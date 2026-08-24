@@ -1,0 +1,35 @@
+services:
+  aiostreams-gate:
+    build: .
+    container_name: aiostreams-gate
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # ── AIOStreams (same env vars you use today, passed straight through) ──
+      BASE_URL: "https://stream.dill.moe"              # your public URL
+      DATABASE_URI: "sqlite://./data/db.sqlite"
+      NODE_ENV: "production"
+      AIOSTREAMS_AUTH: "admin:CHANGE-ME"               # panel login for AIOStreams
+      SECRET_KEY: "CHANGE-ME-32-characters-random"     # encryption key
+
+      # ── aio-gate ─────────────────────────────────────────────────────────
+      # Master manifest URL (optional — can also be set in the panel Settings;
+      # panel value overrides this). Get uuid/password from your panel:
+      # Save & Install → Copy URL, then replace the host with http://127.0.0.1:3210
+      MASTER_URL: "http://127.0.0.1:3210/stremio/your-uuid/your-password/manifest.json"
+      # Public base of the gate — what key URLs are built from. Optional, too.
+      PUBLIC_BASE: "https://stream.dill.moe"
+      # Gate admin login. If omitted, the first AIOSTREAMS_AUTH pair is used.
+      # ADMIN_USERNAME: "admin"
+      # ADMIN_PASSWORD: "CHANGE-ME"
+      # SESSION_SECRET: "CHANGE-ME-too"
+      # Internal port AIOStreams binds inside the container (unpublished):
+      # AIOSTREAMS_INTERNAL_PORT: "3210"
+      # Public port the gate binds:
+      # PORT: "3000"
+      # KEY_LENGTH: "12"
+      # TRUST_PROXY: "0"
+
+    volumes:
+      - ./data:/app/data

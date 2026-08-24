@@ -1,0 +1,15 @@
+{
+  "name": "aio-gate",
+  "version": "1.0.0",
+  "description": "Key-gated proxy for a shared AIOStreams master — revocable sub-keys with a dark admin panel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "sh test/run.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
