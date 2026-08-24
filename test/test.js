@@ -299,6 +299,24 @@ async function main() {
     JSON.stringify(fbSeries && { s: fbSeries.season, n: fbSeries.episodeNumber })
   );
 
+  // master meta names the show but has no matching episode video (different
+  // video id scheme) -> S/E still derived from the episode id
+  res = await fetch(`${BASE}/go/${kid}/stream/series/tt456%3A3%3A7.json`);
+  await new Promise((r) => setTimeout(r, 900));
+  res = await fetch(`${BASE}/panel/api/keys/${kid}/history`, { headers: authHeaders });
+  const histDerived = await res.json();
+  const derived = histDerived.entries.find((e) => e.id === 'tt456:3:7');
+  check(
+    'series title from master meta',
+    derived && derived.title === 'Mock series tt456',
+    derived && derived.title
+  );
+  check(
+    'S/E derived when meta lacks the episode',
+    derived && derived.season === 3 && derived.episodeNumber === 7,
+    JSON.stringify(derived && { s: derived.season, n: derived.episodeNumber })
+  );
+
   check('only stream lookups recorded', hist.entries.every((e) => ['movie', 'series', 'channel'].includes(e.type)));
 
   // --- single-key detail endpoint ---

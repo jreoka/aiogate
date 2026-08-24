@@ -715,6 +715,17 @@ function parseMetaInfo(data, type, id) {
       }
     }
   }
+  // The meta named the show but didn't list this episode (e.g. a metadata
+  // addon whose video ids don't match `tt123:1:2`). Still show S/E derived
+  // from the episode id itself, like the IMDb fallback does.
+  if (type === 'series' && !info.episode && String(id).includes(':')) {
+    const parts = String(id).split(':');
+    const s = Number(parts[1]);
+    const n = Number(parts[2]);
+    if (Number.isInteger(s) && s >= 0 && Number.isInteger(n) && n >= 0) {
+      info.episode = { season: s, number: n, name: null };
+    }
+  }
   return info;
 }
 
