@@ -72,6 +72,20 @@ const HISTORY_META_RETRY_MS = clampInt(
   1000,
   3600000
 );
+// When the master can't resolve a title (no meta resource, error meta, slow
+// or down), fall back to IMDb's unofficial suggestion API — the same one
+// Torrentio uses — for tt* ids. No API key needed. TITLE_IMDB_FALLBACK=0
+// disables it; IMDB_SUGGEST_URL overrides the endpoint (mainly for tests).
+const TITLE_IMDB_FALLBACK =
+  ENV.TITLE_IMDB_FALLBACK === undefined
+    ? true
+    : isTruthy(ENV.TITLE_IMDB_FALLBACK);
+const IMDB_SUGGEST_BASE = (
+  ENV.IMDB_SUGGEST_URL || 'https://v2.sg.media-imdb.com'
+).replace(/\/+$/, '');
+// Unknown ids are cached negative so we don't re-hit IMDb for them too often.
+const IMDB_FAIL_TTL_MS = 6 * 3600 * 1000;
+const imdbFailCache = new Map();
 const MAX_REWRITE_BYTES = 16 * 1024 * 1024;
 const LOGIN_MAX_FAILS = 10;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
@@ -632,7 +646,7 @@ function pruneHistory(force) {
 function keyHistory(keyId, limit) {
   if (!state.history) return [];
   const out = [];
-  const canResolve = !!effectiveMasterUrl();
+  const canResolve = !!effectiveMasterUrl() || TITLE_IMDB_FALLBACK;
   const now = Date.now();
   let reattempted = 0;
   for (let i = state.history.length - 1; i >= 0 && out.length < limit; i--) {
@@ -677,6 +691,10 @@ function parseMetaInfo(data, type, id) {
   if (!meta) return null;
   const name = String(meta.name || '').trim();
   if (!name) return null;
+  // AIOStreams error metas look like "[❌] Addon - Error" — that's a failure
+  // placeholder, not a real title. Treat it as unresolved so the IMDb
+  // fallback gets a chance instead of showing "[❌] ..." in watch history.
+  if (name.includes('[❌]')) return null;
   const info = { name };
   if (type === 'series' && Array.isArray(meta.videos)) {
     const v = meta.videos.find((x) => String(x.id) === String(id));
@@ -791,7 +809,8 @@ function resolveMeta(keyRec, type, id) {
   try {
     master = parseMaster(masterUrl);
   } catch {
-    return Promise.resolve(null);
+    // No usable master configured — the IMDb fallback can still name tt ids.
+    return fallbackTitle(type, id, cacheKey);
   }
   const baseId = String(id).split(':')[0];
   // For episode ids (tt123:1:2) the series meta (base id) carries the
@@ -808,9 +827,106 @@ function resolveMeta(keyRec, type, id) {
       if (info) {
         if (titleCache.size > TITLE_CACHE_MAX) titleCache.clear();
         titleCache.set(cacheKey, info);
+        return info;
       }
-      return info;
+      return fallbackTitle(type, id, cacheKey);
     });
+}
+
+/**
+ * Last-resort title lookup against IMDb's suggestion API for tt* ids (the
+ * same unofficial endpoint Torrentio uses). Only fires when the master's own
+ * meta couldn't name the item. For series episode ids (tt123:1:2) it attaches
+ * S/E numbers parsed from the id itself; the episode name still needs real
+ * meta, so it stays null. Negative results are cached so unknown ids aren't
+ * re-queried for a while.
+ */
+function fallbackTitle(type, id, cacheKey) {
+  const baseId = String(id).split(':')[0];
+  return imdbTitleLookup(baseId).then((fb) => {
+    if (!fb) return null;
+    if (type === 'series' && id !== baseId) {
+      const parts = String(id).split(':');
+      const s = Number(parts[1]);
+      const n = Number(parts[2]);
+      fb.episode = {
+        season: Number.isInteger(s) && s >= 0 ? s : null,
+        number: Number.isInteger(n) && n >= 0 ? n : null,
+        name: null,
+      };
+    }
+    if (titleCache.size > TITLE_CACHE_MAX) titleCache.clear();
+    titleCache.set(cacheKey, fb);
+    return fb;
+  });
+}
+
+function imdbTitleLookup(baseId) {
+  if (!TITLE_IMDB_FALLBACK) return Promise.resolve(null);
+  if (!/^tt\d+$/.test(baseId)) return Promise.resolve(null);
+  const lastFail = imdbFailCache.get(baseId) || 0;
+  if (Date.now() - lastFail < IMDB_FAIL_TTL_MS) return Promise.resolve(null);
+  const url = `${IMDB_SUGGEST_BASE}/suggestion/${baseId.slice(0, 1)}/${baseId}.json`;
+  return getJson(url, 6000)
+    .then((data) => {
+      const hit =
+        data && Array.isArray(data.d)
+          ? data.d.find((x) => x && String(x.id) === baseId && x.l)
+          : null;
+      if (!hit) {
+        imdbFailCache.set(baseId, Date.now());
+        return null;
+      }
+      const name = String(hit.l).trim();
+      return name ? { name } : null;
+    })
+    .catch(() => null);
+}
+
+/** GET a JSON URL with a bounded body and timeout. Resolves null on any
+ * failure; never throws. */
+function getJson(urlStr, timeoutMs) {
+  return new Promise((resolve) => {
+    let u;
+    try {
+      u = new URL(urlStr);
+    } catch {
+      return resolve(null);
+    }
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.get(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port,
+        path: u.pathname + u.search,
+        timeout: timeoutMs,
+        headers: { accept: 'application/json' },
+      },
+      (upRes) => {
+        if (upRes.statusCode !== 200) {
+          upRes.resume();
+          return resolve(null);
+        }
+        const chunks = [];
+        let size = 0;
+        upRes.on('data', (c) => {
+          size += c.length;
+          if (size <= 256 * 1024) chunks.push(c);
+        });
+        upRes.on('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          } catch {
+            resolve(null);
+          }
+        });
+        upRes.on('error', () => resolve(null));
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => resolve(null));
+  });
 }
 
 /* ============================================================

@@ -148,6 +148,14 @@ const server = http.createServer((req, res) => {
     const rest = p.slice(`${ROOT}/meta/`.length);
     const type = rest.split('/')[0];
     const id = decodeURIComponent((rest.split('/')[1] || '').replace(/\.json$/, ''));
+    // tt999 exists in the mock's IMDb suggestion index but NOT in its meta,
+    // so titles for it must come from the gate's IMDb fallback. 404 both the
+    // series id and its episode form (tt999:2:5), like a master with no
+    // episode-level meta.
+    if (id.split(':')[0] === 'tt999') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      return res.end('{}');
+    }
     const name =
       id === 'tt123' && type === 'movie'
         ? 'Mock Movie: Test Title'
@@ -162,6 +170,18 @@ const server = http.createServer((req, res) => {
       ];
     }
     return json(res, { meta });
+  }
+
+  // Mimic the unofficial IMDb suggestion API the gate's title fallback uses
+  // (gate points IMDB_SUGGEST_URL here in tests).
+  if (p.startsWith('/suggestion/')) {
+    const id = decodeURIComponent(
+      (p.split('/').pop() || '').replace(/\.json$/, '')
+    );
+    return json(res, {
+      d: [{ id, l: `IMDB Fallback Title ${id}`, qid: 'movie' }],
+      q: id,
+    });
   }
 
   if (p === '/api/v1/debrid/playback/abc/xyz/title.mp4') {

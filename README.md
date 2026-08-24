@@ -167,6 +167,8 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |
 | `HISTORY_META_RETRY_MS` | `30000` | Min gap between title-lookup retries for a titleless history entry (1000–3600000) |
+| `TITLE_IMDB_FALLBACK` | `1` | When the master can't serve meta, look the title up on IMDb's suggestion API for `tt*` ids (`0` disables) |
+| `IMDB_SUGGEST_URL` | `https://v2.sg.media-imdb.com` | Base URL of the IMDb suggestion API (mainly useful for tests/self-hosted mirrors) |
 
 ## Panel settings
 
@@ -207,6 +209,14 @@ opened — at most once per `HISTORY_META_RETRY_MS` (default 30s) per entry, so
 a recovering master backfills old rows too. Manifest loads, catalog browsing
 and playback segments are **not** recorded, so the list is "what did this
 person actually try to watch", not a request dump.
+
+If the master can't name an item at all — no addon with a `meta` resource,
+an AIOStreams `[❌]` error meta, or no master configured yet — the gate falls
+back to IMDb's suggestion API for `tt*` ids (the same unofficial endpoint
+Torrentio uses, no API key required) and shows the movie/series title anyway.
+Series episodes get `SxxExx` derived from the id itself (`tt123:1:2` →
+S01E02); only the episode *name* still needs real meta. Disable with
+`TITLE_IMDB_FALLBACK=0`.
 
 Logs are pruned automatically — entries older than `HISTORY_RETENTION_DAYS`
 (default **30 days**) are deleted on boot, every 6h, and after each new entry

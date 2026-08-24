@@ -60,6 +60,7 @@ mock.listen(0, '127.0.0.1', () => {
       env: {
         ...process.env,
         HISTORY_META_RETRY_MS: '1000',
+        TITLE_IMDB_FALLBACK: '0', // this test exercises the master-meta path only
         MASTER_URL: `http://127.0.0.1:${mport}/stremio/u/my-alias/manifest.json`,
         ADMIN_USERNAME: 'admin',
         ADMIN_PASSWORD: 'pw',

@@ -269,6 +269,36 @@ async function main() {
     epEntry && epEntry.episodeName
   );
 
+  // --- IMDb fallback: master meta 404s, gate names it from the suggestion API ---
+  res = await fetch(`${BASE}/go/${kid}/stream/movie/tt999.json`);
+  check('fallback movie stream status 200', res.status === 200);
+  await new Promise((r) => setTimeout(r, 900));
+  res = await fetch(`${BASE}/panel/api/keys/${kid}/history`, { headers: authHeaders });
+  const histFb = await res.json();
+  const fbMovie = histFb.entries.find((e) => e.id === 'tt999');
+  check(
+    'imdb fallback names movie',
+    fbMovie && fbMovie.title === 'IMDB Fallback Title tt999',
+    fbMovie && fbMovie.title
+  );
+
+  // series episode whose meta 404s: IMDb names the show, S/E comes from the id
+  res = await fetch(`${BASE}/go/${kid}/stream/series/tt999%3A2%3A5.json`);
+  await new Promise((r) => setTimeout(r, 900));
+  res = await fetch(`${BASE}/panel/api/keys/${kid}/history`, { headers: authHeaders });
+  const histFb2 = await res.json();
+  const fbSeries = histFb2.entries.find((e) => e.id === 'tt999:2:5');
+  check(
+    'imdb fallback names series episode',
+    fbSeries && fbSeries.title === 'IMDB Fallback Title tt999',
+    fbSeries && fbSeries.title
+  );
+  check(
+    'imdb fallback derives S/E from id',
+    fbSeries && fbSeries.season === 2 && fbSeries.episodeNumber === 5,
+    JSON.stringify(fbSeries && { s: fbSeries.season, n: fbSeries.episodeNumber })
+  );
+
   check('only stream lookups recorded', hist.entries.every((e) => ['movie', 'series', 'channel'].includes(e.type)));
 
   // --- single-key detail endpoint ---
