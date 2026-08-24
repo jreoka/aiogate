@@ -1,17 +1,16 @@
 # aio-gate
 
 A small, zero-dependency gateway that sits in front of **one master AIOStreams
-instance** and hands out **revocable sub-keys** to friends and family — now
-with an optional **bundled mode** where AIOStreams runs inside the same
-container, hidden from the public internet.
+instance** and hands out **revocable sub-keys** to friends and family.
+AIOStreams runs inside the same container as the gate, hidden from the public
+internet.
 
 - 🔑 Each person gets their own key URL: `https://gate.example/go/<key>/manifest.json`
 - ⏸ Pause, ▶ resume, or ❌ revoke any key from a flat, OLED-black admin panel — no AIOStreams changes needed
 - 📺 Per-key **watch history**: every key's page shows what media it streamed (movie/series ids, titles, when, how much data), auto-deleted after **30 days** to save space
 - 🔒 The master manifest URL (uuid/password) never appears in anything handed out — the gate proxies and rewrites it out of every response
 - 📊 Per-key usage stats: requests, bandwidth (**last 30 days + lifetime**), last used, last IP
-- 🐳 **Bundled image**: AIOStreams + gate in one container, one volume, AIOStreams panel only reachable through the gate's admin login
-- 🧩 Standalone mode: point the gate at any existing AIOStreams instance (public or private)
+- 🐳 **One container**: AIOStreams + gate together, one volume, AIOStreams panel only reachable through the gate's admin login
 
 ---
 
@@ -44,7 +43,7 @@ update settings (debrid keys, addons, filters, …).
 
 ---
 
-## Bundled mode (recommended) — AIOStreams inside the gate
+## Deployment — AIOStreams inside the gate (one container)
 
 One container runs **both** processes:
 
@@ -58,14 +57,16 @@ The gate owns the whole public URL namespace:
 | Public path | What it is | Who can use it |
 |---|---|---|
 | `/go/<key>/manifest.json` | your friends' addon install URLs | anyone with a valid key |
-| `/panel/` | the gate's key-admin panel | gate admin login |
-| `/` , `/login`, `/dashboard`, `/stremio/...`, `/api/v1/...`, `/assets/...` | the **AIOStreams panel** (proxied transparently) | **only after gate admin login** |
+| `/panel/` | the gate's key-admin panel (and the landing page — `/` redirects here) | gate admin login |
+| `/panel/<label>` | one page per key, e.g. `/panel/Test` | gate admin login |
+| `/`, `/login`, `/dashboard`, `/stremio/...`, `/api/v1/...`, `/assets/...` | the **AIOStreams panel** (proxied transparently), entered via the gate panel's "AIOStreams panel ↗" button (`/?aiostreams=1`) | **only after gate admin login** |
 | `/healthz` | health (checks AIOStreams too) | public |
 
 So the AIOStreams panel — including its configure pages, dashboard, and even
 the addon API at `/stremio/<uuid>/<pass>/...` — is completely hidden behind the
-gate's admin login. There's an "AIOStreams panel ↗" button in the gate panel
-that opens it for you. You log into AIOStreams once with your
+gate's admin login. Visiting the site root redirects to the gate panel
+(`/panel/`); the "AIOStreams panel ↗" button in the gate panel opens AIOStreams
+for you (`/?aiostreams=1`). You log into AIOStreams once with your
 `AIOSTREAMS_AUTH` credentials (its own session cookie flows through the proxy).
 
 ### Deploy (Docker)
@@ -109,21 +110,6 @@ at `/app/data` and publish only port **3000**.
 > at the new image and AIOStreams picks up right where it left off. Your master
 > config (uuid/password) is already in there; just put it in `MASTER_URL`.
 
-## Standalone mode — gate in front of an existing AIOStreams
-
-If you'd rather keep AIOStreams where it is, run the gate by itself against it:
-
-```bash
-node --version   # need >= 20 (no npm install, zero dependencies)
-MASTER_URL="https://aiostreams.example/stremio/uuid/pass/manifest.json" \
-ADMIN_PASSWORD="secret" \
-PUBLIC_BASE="https://gate.example.com" \
-PORT=8080 node server.js
-```
-
-Routing is the same except the AIOStreams surface is *not* proxied (the gate
-only exposes `/go/...` and `/panel/`; `/` redirects to `/panel/`).
-
 ---
 
 ## How it works
@@ -147,8 +133,8 @@ occurrence of the master origin rewritten to route back through the gate:
 - `https://master/anything/else/…` → `https://gate/go/<key>/raw/anything/else/…`
 - relative redirects (`Location: /foo`) → `https://gate/go/<key>/raw/foo`
 
-In bundled mode the gate additionally rewrites `BASE_URL` and the internal URL,
-so native-usenet playback links (built by AIOStreams from its `BASE_URL`) stay
+The gate additionally rewrites `BASE_URL` and the internal URL, so
+native-usenet playback links (built by AIOStreams from its `BASE_URL`) stay
 inside the gate too. Direct debrid CDN URLs (TorBox etc.) pass through
 untouched — exactly like your current child-profile setup.
 
@@ -161,16 +147,16 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | Variable | Default | Description |
 |---|---|---|
 | `MASTER_URL` | — (recommended) | Master AIOStreams manifest URL. **Can also be set from the panel (Settings)** — the panel value overrides this env fallback; the gate boots fine without it (banner until configured) |
-| `AIOSTREAMS_INTERNAL_URL` | — | Set to enable bundled mode; root namespace becomes an admin-gated transparent proxy to this URL |
-| `AIOSTREAMS_INTERNAL_PORT` | `3210` | Internal port AIOStreams binds inside the bundled container (used by `docker/start.sh`) |
+| `AIOSTREAMS_INTERNAL_URL` | `http://127.0.0.1:3210` | Internal AIOStreams URL. Bundled mode is the only mode — the root namespace is an admin-gated transparent proxy to this URL |
+| `AIOSTREAMS_INTERNAL_PORT` | `3210` | Internal port AIOStreams binds inside the container (used by `docker/start.sh`; also the default internal URL above) |
 | `ADMIN_PASSWORD` | first `AIOSTREAMS_AUTH` pair | Gate admin password |
 | `ADMIN_USERNAME` | `admin` (or first `AIOSTREAMS_AUTH` user) | Gate admin username |
 | `SESSION_SECRET` | derived from password | HMAC key for session cookies |
 | `PUBLIC_BASE` | request host | Public base URL of the gate, used to build shareable key URLs. **Can also be set from the panel (Settings)** — panel value wins over this env fallback |
-| `PORT` | `8080` (gate alone) / `3000` (bundled) | Gate listen port |
+| `PORT` | `3000` | Gate listen port (the only published port) |
 | `HOST` | `0.0.0.0` | Listen address |
-| `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (bundled image sets `/app/data/keys.json`) |
-| `REWRITE_ORIGINS` | master origin (+`BASE_URL`/internal in bundled) | Extra origins to rewrite to the gate |
+| `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (container sets `/app/data/keys.json`) |
+| `REWRITE_ORIGINS` | master origin (+`BASE_URL`/internal) | Extra origins to rewrite to the gate |
 | `TRUST_PROXY` | `0` | Honor `X-Forwarded-Proto`/`Host` (only behind a trusted proxy) |
 | `KEY_LENGTH` | `12` | Key id length in characters (8–32) |
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
@@ -195,16 +181,22 @@ clear 503 in the meantime.
 
 ## Per-key page & watch history
 
-Click **Manage** on any key row to open that key's page: its URL (with a copy
+Click **Manage** on any key row to open that key's page — every key has its
+own URL under the panel (`/panel/<label>`, e.g. `/panel/Test`; duplicate
+labels get `-2`, `-3`, … suffixes). The page shows the key's URL (with a copy
 button), usage stats, and all controls — pause/resume, edit, revoke, delete —
-live there instead of cluttering the dashboard table.
+instead of cluttering the dashboard table.
 
 The same page shows a **Watch history** table: every time Stremio asks the key
 for streams (`/go/<key>/stream/<type>/<id>.json`), the gate logs the type
 (movie/series/channel), the media id, a best-effort title (resolved from the
-master's `meta` catalog, cached), bytes served and IP. Manifest loads,
-catalog browsing and playback segments are **not** recorded, so the list is
-"what did this person actually try to watch", not a request dump.
+master's `meta` catalog, cached), bytes served and IP. Series episodes get
+`SxxExx` + episode name when the master's meta includes them, so rows read
+"Breaking Bad · S01E02 Pilot" instead of `tt12042730`. Entries recorded while
+the master wasn't configured get one automatic retry the next time the page is
+opened. Manifest loads, catalog browsing and playback segments are **not**
+recorded, so the list is "what did this person actually try to watch", not a
+request dump.
 
 Logs are pruned automatically — entries older than `HISTORY_RETENTION_DAYS`
 (default **30 days**) are deleted on boot, every 6h, and after each new entry
@@ -217,9 +209,10 @@ Deleting a key deletes its history with it.
 sh test/run.sh
 ```
 
-Starts a fake AIOStreams master (with a mock panel surface) and runs the gate
-in **both** modes: 48 standalone checks + 25 bundled checks (admin gating,
-cookie round-trips, key proxy, origin scrubbing, watch history).
+Starts a fake AIOStreams master (with a mock panel surface) and the gate in
+its single bundled layout: the core suite (key proxy, admin API, settings,
+watch history, per-key page URLs) plus the AIOStreams-surface suite (admin
+gating, cookie round-trips, root landing on `/panel/`).
 
 ## Deployment notes
 

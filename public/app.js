@@ -4,7 +4,7 @@
 
 const state = {
   keys: [],
-  config: { publicBase: null, master: '', hasCustomMasters: false },
+  config: { publicBase: null },
   view: 'boot',
   currentKeyId: null,
   currentKey: null,
@@ -124,6 +124,84 @@ function keyUrl(key) {
   return `${baseUrl()}/go/${key.id}/manifest.json`;
 }
 
+/* ---------- routing (per-key page URLs) ---------- */
+
+// "Mom — living room TV" -> "Mom-living-room-TV"; safe for URLs.
+function slugify(s) {
+  return String(s || '')
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// Label-based page slugs, deduped ("Test", "Test-2", …) so every key keeps a
+// unique, stable URL even with duplicate labels. Order = newest first, same
+// as the dashboard table.
+function slugMap() {
+  const used = new Set();
+  const byId = new Map();
+  const bySlug = new Map();
+  for (const k of state.keys) {
+    const base = slugify(k.label) || k.id;
+    let slug = base;
+    let n = 2;
+    while (used.has(slug.toLowerCase())) slug = `${base}-${n++}`;
+    used.add(slug.toLowerCase());
+    byId.set(k.id, slug);
+    bySlug.set(slug, k.id);
+  }
+  return { byId, bySlug };
+}
+
+function keyPagePath(id) {
+  const { byId } = slugMap();
+  return '/panel/' + (byId.get(id) || id);
+}
+
+function slugToId(slug) {
+  const { bySlug } = slugMap();
+  if (bySlug.has(slug)) return bySlug.get(slug);
+  // Raw key ids still work as URLs (label-independent deep links).
+  return state.keys.some((k) => k.id === slug) ? slug : null;
+}
+
+function currentSlug() {
+  const p = location.pathname;
+  if (!p.startsWith('/panel/')) return '';
+  return decodeURIComponent(p.slice('/panel/'.length));
+}
+
+function navigate(path) {
+  if (location.pathname === path) {
+    route();
+    return;
+  }
+  history.pushState(null, '', path);
+  route();
+}
+
+// Render whatever page the current URL describes: /panel/ = dashboard,
+// /panel/<label> = that key's page.
+function route() {
+  if (!state.username) {
+    renderLogin();
+    return;
+  }
+  const slug = currentSlug();
+  if (slug) {
+    const id = slugToId(slug);
+    if (id) {
+      renderKey(id);
+      return;
+    }
+    history.replaceState(null, '', '/panel/');
+    toast('Key not found', 'warn');
+    renderDash();
+    return;
+  }
+  renderDash();
+}
+
 /* ---------- views ---------- */
 
 function renderLogin() {
@@ -193,7 +271,7 @@ function renderDash() {
         <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
         <span class="user-chip">${esc(state.username)}</span>
         <button class="btn btn-sm btn-ghost" id="settings-btn">Settings</button>
-        ${state.config.bundled ? `<a class="btn btn-sm" href="/" target="_blank" rel="noopener">AIOStreams panel ↗</a>` : ''}
+        <a class="btn btn-sm" href="/?aiostreams=1" target="_blank" rel="noopener">AIOStreams panel ↗</a>
         <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
       </header>
 
@@ -280,6 +358,7 @@ function renderDash() {
 function renderTable() {
   const wrap = $('#keys-table');
   if (!wrap) return;
+  const slugs = slugMap(); // key id -> page slug (deduped)
 
   const head = `<thead><tr>
       <th>Key / URL</th>
@@ -304,6 +383,7 @@ function renderTable() {
         ? `${st === 'expired' ? 'expired ' : ''}${new Date(k.expiresAt).toLocaleDateString()}`
         : '—';
       const lastIp = k.usage.lastIp ? ` · ${esc(k.usage.lastIp)}` : '';
+      const pagePath = '/panel/' + (slugs.byId.get(k.id) || k.id);
 
       return `<tr>
         <td class="key-cell">
@@ -325,7 +405,7 @@ function renderTable() {
         </td>
         <td>
           <div class="row-actions">
-            <button class="btn btn-sm btn-primary" data-act="manage" data-id="${k.id}">Manage</button>
+            <a class="btn btn-sm btn-primary" href="${pagePath}" data-act="manage" data-id="${k.id}">Manage</a>
           </div>
         </td>
       </tr>`;
@@ -334,17 +414,17 @@ function renderTable() {
 
   wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="8"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
 
-  wrap.querySelectorAll('button[data-act]').forEach((btn) => {
-    btn.addEventListener('click', () => act(btn.dataset.act, btn.dataset.id));
+  wrap.querySelectorAll('a[data-act]').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      navigate(a.getAttribute('href'));
+    });
   });
 }
 
 /* ---------- actions ---------- */
 
-// All per-key controls live on the dedicated key page now.
-async function act(name, id) {
-  if (name === 'manage') await renderKey(id);
-}
+// All per-key controls live on the dedicated key page (own URL per key).
 
 function openEditModal(key) {
   const overlay = openModal(`
@@ -472,7 +552,7 @@ function renderSettings() {
                 placeholder="https://.../stremio/<uuid>/<password>/manifest.json" spellcheck="false">
               <p class="hint">The single AIOStreams config every key proxies to. Leave empty to fall back to the
                 <code>MASTER_URL</code> env var. Find yours in the AIOStreams panel: Save &amp; Install → Copy URL
-                (in bundled mode, swap the host for <code>http://127.0.0.1:3210</code>).</p>
+                (AIOStreams runs inside the gate at <code>http://127.0.0.1:3210</code>).</p>
             </div>
             <div class="field">
               <label for="set-base">Public base URL ${envBaseBadge}</label>
@@ -555,6 +635,9 @@ function wireTopbar() {
   const back = $('#back-btn');
   if (back)
     back.addEventListener('click', async () => {
+      state.view = 'dash';
+      state.currentKeyId = null;
+      history.pushState(null, '', '/panel/');
       await refresh();
       renderDash();
     });
@@ -587,6 +670,10 @@ function keyPageShell() {
 async function renderKey(id) {
   state.view = 'key';
   state.currentKeyId = id;
+  // Keep the address bar on this key's own URL (label may have changed or
+  // duplicate labels re-deduped since the link was rendered).
+  const want = keyPagePath(id);
+  if (want !== location.pathname) history.replaceState(null, '', want);
   $('#app').innerHTML = keyPageShell();
   wireTopbar();
   await refreshKey();
@@ -611,6 +698,7 @@ async function refreshKey() {
     } else if (err.status === 404) {
       toast('Key not found', 'error');
       state.currentKeyId = null;
+      history.replaceState(null, '', '/panel/');
       renderDash();
     } else {
       toast(err.message, 'error');
@@ -732,6 +820,8 @@ function renderKeyPage() {
       await api(`api/keys/${k.id}`, { method: 'DELETE' });
       toast('Key deleted');
       state.currentKeyId = null;
+      state.view = 'dash';
+      history.pushState(null, '', '/panel/');
       await refresh();
       renderDash();
     } catch (err) {
@@ -746,24 +836,41 @@ function renderKeyPage() {
   renderHistTable(hist, '');
 }
 
+function histMediaLine(e) {
+  const parts = [];
+  if (e.season != null || e.episodeNumber != null) {
+    const s = e.season != null ? String(e.season).padStart(2, '0') : '?';
+    const n =
+      e.episodeNumber != null ? String(e.episodeNumber).padStart(2, '0') : '?';
+    parts.push(`S${s}E${n}`);
+  }
+  if (e.episodeName) parts.push(e.episodeName);
+  return parts.join(' · ');
+}
+
 function renderHistTable(entries, q) {
   const wrap = $('#hist-table');
   if (!wrap) return;
   const rows = entries
     .filter((e) => {
       if (!q) return true;
-      return [e.type, e.id, e.title, e.ip].some((v) =>
+      return [e.type, e.id, e.title, e.episodeName, e.ip].some((v) =>
         String(v || '').toLowerCase().includes(q)
       );
     })
     .map((e) => {
       const title = e.title || e.id;
-      const idPart = e.title ? `<div class="faint" style="font-size:11px">${esc(e.id)}</div>` : '';
+      const ep = histMediaLine(e);
+      const idPart = e.title
+        ? `<div class="faint" style="font-size:11px">${esc(e.id)}</div>`
+        : '';
+      const epPart = ep ? `<div class="hist-ep">${esc(ep)}</div>` : '';
       return `<tr>
         <td class="faint" style="white-space:nowrap">${relTime(e.ts)}</td>
         <td><span class="badge">${esc(e.type)}</span></td>
         <td>
           <div class="hist-title">${esc(title)}</div>
+          ${epPart}
           ${idPart}
         </td>
         <td class="faint">${fmtBytes(e.bytes)}</td>
@@ -791,7 +898,14 @@ async function refresh() {
     state.keys = keyRes.keys;
     state.config = cfg;
     if (state.view === 'dash') renderTable();
-    else if (state.view === 'key') refreshKey();
+    else if (state.view === 'key') {
+      const id = state.currentKeyId;
+      if (id) {
+        const want = keyPagePath(id);
+        if (want !== location.pathname) history.replaceState(null, '', want);
+      }
+      refreshKey();
+    }
   } catch (err) {
     if (err.status === 401) {
       renderLogin();
@@ -804,11 +918,14 @@ async function boot() {
     const me = await api('api/me');
     state.username = me.username;
     await refresh();
-    renderDash();
+    route();
   } catch {
     renderLogin();
   }
 }
+
+// Browser back/forward between /panel/ and /panel/<label>.
+window.addEventListener('popstate', route);
 
 setInterval(() => {
   if (state.view === 'dash') refresh();

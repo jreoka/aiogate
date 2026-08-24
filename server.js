@@ -68,11 +68,15 @@ const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
 // When AIOSTREAMS_INTERNAL_URL is set, the gate owns the whole public root
 // namespace and admin-gated-transparently proxies everything else to the
 // internal AIOStreams, so the AIOStreams panel is never public.
-const AIOSTREAMS_INTERNAL_URL = (ENV.AIOSTREAMS_INTERNAL_URL || '').replace(
-  /\/+$/,
-  ''
-);
-const BUNDLED = !!AIOSTREAMS_INTERNAL_URL;
+// Bundled mode is the only mode: AIOStreams runs next to the gate inside the
+// same container and the gate owns the whole public root namespace,
+// admin-gating a transparent proxy to the internal AIOStreams. The default
+// matches the container layout (docker/start.sh binds AIOStreams to the
+// internal port; the gate owns the public port).
+const AIOSTREAMS_INTERNAL_URL = (
+  ENV.AIOSTREAMS_INTERNAL_URL ||
+  `http://127.0.0.1:${ENV.AIOSTREAMS_INTERNAL_PORT || 3210}`
+).replace(/\/+$/, '');
 
 if (!ADMIN_PASSWORD) {
   console.error(
@@ -97,19 +101,17 @@ if (ENV_MASTER_URL) {
   );
 }
 
-const INTERNAL = BUNDLED ? parseOrigin(AIOSTREAMS_INTERNAL_URL) : null;
+const INTERNAL = parseOrigin(AIOSTREAMS_INTERNAL_URL);
 
 // Env-supplied origins rewritten out of /go responses. The master origin is
 // dynamic (it can change from the panel) and is prepended per request.
 const AUTO_ORIGINS = [];
-if (BUNDLED) {
-  for (const raw of [ENV.BASE_URL, AIOSTREAMS_INTERNAL_URL, ENV_MASTER_URL]) {
-    if (!raw) continue;
-    try {
-      AUTO_ORIGINS.push(new URL(raw).origin);
-    } catch {
-      /* ignore */
-    }
+for (const raw of [ENV.BASE_URL, AIOSTREAMS_INTERNAL_URL, ENV_MASTER_URL]) {
+  if (!raw) continue;
+  try {
+    AUTO_ORIGINS.push(new URL(raw).origin);
+  } catch {
+    /* ignore */
   }
 }
 const EXTRA_ORIGINS = (ENV.REWRITE_ORIGINS || '')
@@ -126,11 +128,9 @@ const EXTRA_ORIGINS = (ENV.REWRITE_ORIGINS || '')
   .filter(Boolean);
 const REWRITE_ORIGINS_BOOT = [...new Set([...AUTO_ORIGINS, ...EXTRA_ORIGINS])];
 
-if (BUNDLED) {
-  console.log(
-    `[boot] bundled mode: AIOStreams at ${AIOSTREAMS_INTERNAL_URL} — root namespace is admin-gated`
-  );
-}
+console.log(
+  `[boot] bundled mode: AIOStreams at ${AIOSTREAMS_INTERNAL_URL} — root namespace is admin-gated`
+);
 
 /* ============================================================
  * Small helpers
@@ -221,15 +221,7 @@ function parseMaster(raw) {
     hostname: url.hostname,
     port: url.port,
     hostHeader: url.host,
-    masked: origin + masterRoot + '/manifest.json',
-    uuid: m ? m[2] : null,
-    password: m ? m[3] : null,
   };
-}
-
-function maskMaster(master) {
-  if (!master.uuid) return master.masked;
-  return `${master.origin}/stremio/${master.uuid}/${'•'.repeat(6)}/manifest.json`;
 }
 
 /* ============================================================
@@ -535,6 +527,15 @@ function parseStreamRef(suffix) {
   return { type: m[1], id };
 }
 
+function applyMeta(entry, info) {
+  entry.title = info.name;
+  if (info.episode) {
+    entry.season = info.episode.season;
+    entry.episodeNumber = info.episode.number;
+    entry.episodeName = info.episode.name;
+  }
+}
+
 function recordStream(keyRec, ref, bytes, ip) {
   if (!state.history) state.history = [];
   const entry = {
@@ -543,6 +544,10 @@ function recordStream(keyRec, ref, bytes, ip) {
     type: ref.type,
     id: ref.id,
     title: null,
+    season: null,
+    episodeNumber: null,
+    episodeName: null,
+    titleAttempted: false,
     bytes: bytes || 0,
     ip: ip || null,
   };
@@ -550,10 +555,11 @@ function recordStream(keyRec, ref, bytes, ip) {
   pruneHistory();
   scheduleSave();
   // Best-effort title lookup, after the response — never blocks proxying.
-  resolveTitle(keyRec, ref.type, ref.id)
-    .then((t) => {
-      if (t && !entry.title) {
-        entry.title = t;
+  resolveMeta(keyRec, ref.type, ref.id)
+    .then((info) => {
+      if (info && !entry.title) {
+        entry.titleAttempted = true;
+        applyMeta(entry, info);
         scheduleSave();
       }
     })
@@ -599,17 +605,75 @@ function pruneHistory(force) {
   }
 }
 
-/** Newest-first history for one key. */
+/**
+ * Newest-first history for one key. Entries recorded while the master wasn't
+ * configured (or meta was slow) may still be missing a title — each gets one
+ * lazy retry per entry, capped per call so a big backlog can't hammer the
+ * master.
+ */
 function keyHistory(keyId, limit) {
   if (!state.history) return [];
   const out = [];
+  const canResolve = !!effectiveMasterUrl();
+  let reattempted = 0;
   for (let i = state.history.length - 1; i >= 0 && out.length < limit; i--) {
-    if (state.history[i].keyId === keyId) out.push(state.history[i]);
+    const e = state.history[i];
+    if (e.keyId !== keyId) continue;
+    out.push(e);
+    if (canResolve && !e.title && !e.titleAttempted && reattempted < 30) {
+      e.titleAttempted = true;
+      reattempted++;
+      const rec = getKey(keyId);
+      if (rec) {
+        resolveMeta(rec, e.type, e.id)
+          .then((info) => {
+            if (info && !e.title) {
+              applyMeta(e, info);
+              scheduleSave();
+            }
+          })
+          .catch(() => {});
+      }
+    }
   }
   return out;
 }
 
-function fetchMetaTitle(master, type, id) {
+/**
+ * Pull the human-readable bits we care about out of a meta response. For
+ * series, `meta.videos` carries per-episode entries (id `tt123:1:2` -> season
+ * 1, episode 2), so history rows can say "S01E02 Pilot" instead of just the
+ * series title. Returns null when there's nothing to show.
+ */
+function parseMetaInfo(data, type, id) {
+  const meta = data && data.meta;
+  if (!meta) return null;
+  const name = String(meta.name || '').trim();
+  if (!name) return null;
+  const info = { name };
+  if (type === 'series' && Array.isArray(meta.videos)) {
+    const v = meta.videos.find((x) => String(x.id) === String(id));
+    if (v) {
+      const season = v.season != null ? Number(v.season) : null;
+      const number =
+        v.number != null
+          ? Number(v.number)
+          : v.episode != null
+            ? Number(v.episode)
+            : null;
+      if (season != null || number != null) {
+        info.episode = {
+          season,
+          number,
+          name: v.title ? String(v.title) : null,
+        };
+      }
+    }
+  }
+  return info;
+}
+
+function fetchMetaInfo(master, type, id, lookupId) {
   return new Promise((resolve) => {
     const mod = master.protocol === 'https:' ? https : http;
     const req = mod.get(
@@ -618,7 +682,7 @@ function fetchMetaTitle(master, type, id) {
         hostname: master.hostname,
         port: master.port,
         path: `${master.masterRoot}/meta/${type}/${encodeURIComponent(id)}.json`,
-        timeout: 3000,
+        timeout: 5000,
       },
       (upRes) => {
         if (upRes.statusCode !== 200) {
@@ -634,8 +698,9 @@ function fetchMetaTitle(master, type, id) {
         upRes.on('end', () => {
           try {
             const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            const name = data && data.meta && data.meta.name;
-            resolve(name ? String(name) : null);
+            // The episode-video lookup always uses the original streamed id
+            // (tt123:1:2), even when the fetched meta is the series (tt123).
+            resolve(parseMetaInfo(data, type, lookupId || id));
           } catch {
             resolve(null);
           }
@@ -649,10 +714,14 @@ function fetchMetaTitle(master, type, id) {
 }
 
 /**
- * Best-effort, cached title for a streamed item. Episode ids like
- * `tt123:1:2` fall back to the series id. Never throws.
+ * Best-effort, cached title info for a streamed item. Episode ids like
+ * `tt123:1:2` resolve via the series meta (which carries the per-episode
+ * `videos` array), falling back to the full id for masters that answer
+ * episode-level meta directly. Only successful lookups are cached, so a
+ * transient failure (master not configured yet, slow meta) isn't sticky.
+ * Never throws.
  */
-function resolveTitle(keyRec, type, id) {
+function resolveMeta(keyRec, type, id) {
   const cacheKey = `${type}:${id}`;
   if (titleCache.has(cacheKey)) return Promise.resolve(titleCache.get(cacheKey));
   const masterUrl =
@@ -664,16 +733,22 @@ function resolveTitle(keyRec, type, id) {
     return Promise.resolve(null);
   }
   const baseId = String(id).split(':')[0];
-  const candidates = id !== baseId ? [id, baseId] : [baseId];
+  // For episode ids (tt123:1:2) the series meta (base id) carries the
+  // per-episode `videos` array, so look it up first; fall back to the full
+  // id for masters that answer episode-level meta directly.
+  const candidates = id !== baseId ? [baseId, id] : [baseId];
   return candidates
     .reduce(
-      (p, cid) => p.then((title) => title || fetchMetaTitle(master, type, cid)),
+      (p, cid) =>
+        p.then((info) => info || fetchMetaInfo(master, type, cid, id)),
       Promise.resolve(null)
     )
-    .then((title) => {
-      if (titleCache.size > TITLE_CACHE_MAX) titleCache.clear();
-      titleCache.set(cacheKey, title);
-      return title;
+    .then((info) => {
+      if (info) {
+        if (titleCache.size > TITLE_CACHE_MAX) titleCache.clear();
+        titleCache.set(cacheKey, info);
+      }
+      return info;
     });
 }
 
@@ -999,15 +1074,15 @@ function forward(req, res, keyRec, suffix) {
 }
 
 /* ============================================================
- * Proxy route handling
+ * AIOStreams panel proxy
  * ============================================================ */
 
 /**
- * Transparent reverse proxy used in bundled mode for the whole AIOStreams
- * surface (panel SPA, /api/v1, /stremio, /assets ...). Admin-gated at the
- * router level. Unlike the key proxy: cookies pass through in both
- * directions (AIOStreams session), no body rewriting, methods + bodies
- * forwarded, streaming throughout.
+ * Transparent reverse proxy for the whole AIOStreams surface (panel SPA,
+ * /api/v1, /stremio, /assets ...). Admin-gated at the router level. Unlike
+ * the key proxy: cookies pass through in both directions (AIOStreams
+ * session), no body rewriting, methods + bodies forwarded, streaming
+ * throughout.
  */
 function forwardPanel(req, res) {
   const started = Date.now();
@@ -1254,25 +1329,20 @@ function handleAdmin(req, res, pathname) {
     const master = effectiveMaster();
     sendJson(res, 200, {
       publicBase: effectivePublicBase() || null,
-      master: master ? maskMaster(master) : null,
       masterConfigured: !!master,
-      bundled: BUNDLED,
-      hasCustomMasters: listKeys().some((k) => k.masterUrl),
-      keyLength: KEY_LENGTH,
+      bundled: true,
     });
     return;
   }
 
   // GET /panel/api/settings — current effective values (admin only)
   if (parts.length === 3 && parts[2] === 'settings' && req.method === 'GET') {
-    const master = effectiveMaster();
     sendJson(res, 200, {
       masterUrl: effectiveMasterUrl(),
       publicBase: effectivePublicBase() || null,
       envMasterUrl: !!ENV_MASTER_URL,
       envPublicBase: !!PUBLIC_BASE,
-      bundled: BUNDLED,
-      rewriteOrigins: effectiveOrigins(master),
+      bundled: true,
     });
     return;
   }
@@ -1500,6 +1570,24 @@ function servePanelFile(res, relFile) {
   }
   fs.readFile(full, (err, data) => {
     if (err) {
+      // SPA fallback: every key has its own page URL (/panel/<label>), so any
+      // unknown extension-less path boots the panel app, which routes to the
+      // key page (or the dashboard when the key is gone).
+      if (!path.extname(relFile)) {
+        fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (err2, html) => {
+          if (err2) {
+            res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+            res.end('not found');
+            return;
+          }
+          res.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-cache',
+          });
+          res.end(html);
+        });
+        return;
+      }
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('not found');
       return;
@@ -1512,8 +1600,7 @@ function servePanelFile(res, relFile) {
   });
 }
 
-/* Gate admin panel lives under /panel so AIOStreams keeps the root
- * namespace in bundled mode. */
+/* Gate admin panel lives under /panel; AIOStreams keeps the root namespace. */
 function handlePanel(req, res, pathname) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1552,16 +1639,7 @@ const PUBLIC_DIR = path.resolve(__dirname, 'public');
  * Router + server
  * ============================================================ */
 
-/* ============================================================
- * Router + server
- * ============================================================ */
-
 function handleHealth(req, res) {
-  if (!BUNDLED) {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"ok":true}');
-    return;
-  }
   const mod = INTERNAL.protocol === 'https:' ? https : http;
   const probe = mod.get(
     {
@@ -1587,7 +1665,7 @@ function handleHealth(req, res) {
   });
 }
 
-/** Bundled mode: admin-gated transparent proxy for the AIOStreams surface. */
+/** The root namespace is an admin-gated transparent proxy for AIOStreams. */
 function handleBundledRoot(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1599,11 +1677,22 @@ function handleBundledRoot(req, res) {
     res.end();
     return;
   }
+  const isHtml = (req.headers.accept || '').includes('text/html');
+  // The gate panel is the landing page. Visiting the bare root goes to
+  // /panel/ (logged in or not); the AIOStreams panel is reached through the
+  // gate panel's "AIOStreams panel" button, which opens /?aiostreams=1.
+  // Everything else at the root still proxies to AIOStreams, so its SPA
+  // (client-side routes like /dashboard and /login) keeps working.
+  if (req.method === 'GET' && isHtml && req.url.split('?')[0] === '/') {
+    const q = new URL(req.url, 'http://aio-gate.local');
+    if (q.searchParams.get('aiostreams') !== '1') {
+      res.writeHead(302, { location: '/panel/' });
+      res.end();
+      return;
+    }
+  }
   if (!adminAuth(req)) {
-    if (
-      req.method === 'GET' &&
-      (req.headers.accept || '').includes('text/html')
-    ) {
+    if (req.method === 'GET' && isHtml) {
       res.writeHead(302, { location: '/panel/' });
       res.end();
       return;
@@ -1629,18 +1718,9 @@ const server = http.createServer((req, res) => {
       handlePanel(req, res, pathname);
       return;
     }
-    if (BUNDLED) {
-      handleBundledRoot(req, res);
-      return;
-    }
-    // Standalone mode: only the key proxy + panel exist at the root.
-    if (pathname === '/') {
-      res.writeHead(302, { location: '/panel/' });
-      res.end();
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('not found');
+    // Bundled mode is the only mode: everything left at the root is the
+    // admin-gated AIOStreams surface.
+    handleBundledRoot(req, res);
   } catch (err) {
     console.error(`[route] ${err.stack || err}`);
     if (!res.headersSent) {

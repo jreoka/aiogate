@@ -1,9 +1,9 @@
 'use strict';
 
 /*
- * test-bundled.js — end-to-end tests for BUNDLED mode: the gate owns the
- * root namespace and admin-gated-transparently proxies the AIOStreams panel.
- * Requires mock-master.js on :3900 and the gate in bundled mode on :8085.
+ * test-bundled.js — end-to-end tests for the AIOStreams surface behind the
+ * gate: root admin-gating, panel proxying, cookie round-trips, key proxy.
+ * Requires mock-master.js on :3900 and the gate (bundled) on :8085.
  */
 
 const BASE = 'http://127.0.0.1:8085';
@@ -63,11 +63,28 @@ async function main() {
   check('gate me ok', res.status === 200);
 
   // --- AIOStreams panel proxied through the gate for admins ---
+  // The bare root now lands on the gate panel; AIOStreams is entered via
+  // the gate panel's button (/?aiostreams=1).
   res = await fetch(`${BASE}/`, {
+    headers: { accept: 'text/html', cookie: gateCookie },
+    redirect: 'manual',
+  });
+  check(
+    'authenticated root lands on gate panel',
+    res.status === 302 &&
+      (res.headers.get('location') || '').includes('/panel/'),
+    res.status
+  );
+
+  res = await fetch(`${BASE}/?aiostreams=1`, {
     headers: { accept: 'text/html', cookie: gateCookie },
   });
   const proxied = await res.text();
-  check('panel proxied to AIOStreams', res.status === 200 && proxied.includes('Mock AIOStreams Panel'));
+  check(
+    'panel proxied to AIOStreams via /?aiostreams=1',
+    res.status === 200 && proxied.includes('Mock AIOStreams Panel'),
+    res.status
+  );
 
   res = await fetch(`${BASE}/assets/app.js`, { headers: { cookie: gateCookie } });
   check('panel assets proxied', res.status === 200 && (res.headers.get('content-type') || '').includes('javascript'));

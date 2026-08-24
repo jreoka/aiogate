@@ -1,13 +1,13 @@
 'use strict';
 
 /*
- * test.js — end-to-end test for aio-gate against the mock master.
- * Requires: mock-master.js running on :3900 and aio-gate on :8081.
+ * test.js — end-to-end tests for the gate's core: key proxy, admin API,
+ * settings and watch history. Runs against the bundled gate (the only mode).
+ * Requires: mock-master.js running on :3900 and aio-gate on :8085.
  * Usage:  node test/run.sh   (or run the pieces manually)
  */
 
-const BASE = 'http://127.0.0.1:8081';
-const MOCK = 'http://127.0.0.1:3900';
+const BASE = 'http://127.0.0.1:8085';
 
 let failures = 0;
 
@@ -232,6 +232,33 @@ async function main() {
   const streamEntry = hist.entries.find((e) => e.type === 'movie' && e.id === 'tt123');
   check('history has movie tt123 entry', !!streamEntry);
   check('history title resolved', streamEntry && streamEntry.title === 'Mock Movie: Test Title', streamEntry && streamEntry.title);
+
+  // series episode -> series title + SxxExx + episode name (from meta.videos)
+  res = await fetch(`${BASE}/go/${kid}/stream/series/tt123%3A1%3A2.json`);
+  check('series stream status 200', res.status === 200);
+  await new Promise((r) => setTimeout(r, 900)); // let async title resolution finish
+  res = await fetch(`${BASE}/panel/api/keys/${kid}/history`, { headers: authHeaders });
+  const histEp = await res.json();
+  const epEntry = histEp.entries.find(
+    (e) => e.type === 'series' && e.id === 'tt123:1:2'
+  );
+  check('history has series episode entry', !!epEntry);
+  check(
+    'episode shows series title',
+    epEntry && epEntry.title === 'Mock series tt123',
+    epEntry && epEntry.title
+  );
+  check(
+    'episode season/episode recorded',
+    epEntry && epEntry.season === 1 && epEntry.episodeNumber === 2,
+    JSON.stringify(epEntry && { s: epEntry.season, n: epEntry.episodeNumber })
+  );
+  check(
+    'episode name recorded',
+    epEntry && epEntry.episodeName === 'Second Episode',
+    epEntry && epEntry.episodeName
+  );
+
   check('only stream lookups recorded', hist.entries.every((e) => ['movie', 'series', 'channel'].includes(e.type)));
 
   // --- single-key detail endpoint ---
@@ -239,6 +266,25 @@ async function main() {
   check('key detail endpoint 200', res.status === 200);
   const detail = await res.json();
   check('key detail matches id', detail.key && detail.key.id === kid);
+
+  // --- per-key page URLs (/panel/<label>) ---
+  res = await fetch(`${BASE}/panel/Test-User`, { headers: authHeaders });
+  check(
+    'per-key page URL serves the panel app',
+    res.status === 200 && (await res.text()).includes('AIO Gate')
+  );
+  res = await fetch(`${BASE}/panel/Test-User/`, { headers: authHeaders });
+  check(
+    'per-key page URL with trailing slash',
+    res.status === 200 && (await res.text()).includes('AIO Gate')
+  );
+  res = await fetch(`${BASE}/panel/does-not-exist`, { headers: authHeaders });
+  check(
+    'unknown slug serves the app (SPA route)',
+    res.status === 200 && (await res.text()).includes('AIO Gate')
+  );
+  res = await fetch(`${BASE}/panel/missing-asset.js`, { headers: authHeaders });
+  check('unknown file paths still 404', res.status === 404);
 
   // --- deleting a key purges its watch history ---
   await fetch(`${BASE}/panel/api/keys/${kid}`, { method: 'DELETE', headers: authHeaders });

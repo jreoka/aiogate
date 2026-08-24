@@ -137,8 +137,20 @@ const server = http.createServer((req, res) => {
     const rest = p.slice(`${ROOT}/meta/`.length);
     const type = rest.split('/')[0];
     const id = decodeURIComponent((rest.split('/')[1] || '').replace(/\.json$/, ''));
-    const name = id === 'tt123' ? 'Mock Movie: Test Title' : `Mock ${type} ${id}`;
-    return json(res, { meta: { id, type, name } });
+    const name =
+      id === 'tt123' && type === 'movie'
+        ? 'Mock Movie: Test Title'
+        : `Mock ${type} ${id}`;
+    const meta = { id, type, name };
+    // Series meta carries per-episode entries, powering "S01E02 Pilot" in
+    // the gate's watch history.
+    if (type === 'series' && id === 'tt123') {
+      meta.videos = [
+        { id: 'tt123:1:1', season: 1, number: 1, title: 'Pilot' },
+        { id: 'tt123:1:2', season: 1, number: 2, title: 'Second Episode' },
+      ];
+    }
+    return json(res, { meta });
   }
 
   if (p === '/api/v1/debrid/playback/abc/xyz/title.mp4') {

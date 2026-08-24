@@ -351,8 +351,6 @@ table.keys tbody tr:hover { background: var(--surface-2); }
   padding: 1px 6px;
 }
 
-.mono { font-family: var(--mono); }
-.muted { color: var(--muted); }
 .faint { color: var(--faint); }
 
 .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
@@ -416,6 +414,8 @@ table.keys tbody tr:hover { background: var(--surface-2); }
 
 .hist-title { font-weight: 550; }
 
+.hist-ep { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
 /* ---------- modal ---------- */
 
 .modal-overlay {
@@ -443,16 +443,6 @@ table.keys tbody tr:hover { background: var(--surface-2); }
 .modal .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
 
 .modal .btn-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
-
-.warn-box {
-  background: var(--red-dim);
-  border: 1px solid var(--red-border);
-  color: var(--red);
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  margin-bottom: 16px;
-}
 
 /* ---------- banner ---------- */
 
