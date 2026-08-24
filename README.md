@@ -93,7 +93,12 @@ SECRET_KEY=your-64-hex-char-key
 # Master manifest URL AS SEEN FROM INSIDE the container. To find it: open the
 # AIOStreams panel (via the gate), go to Save & Install, click "Copy URL" on
 # YOUR main profile, then swap the host for http://127.0.0.1:3210
-MASTER_URL=http://127.0.0.1:3210/stremio/<your-uuid>/<your-password>/manifest.json
+#
+# Both URL formats work: the classic /stremio/<uuid>/<password>/... and the
+# newer short alias /stremio/u/<alias>/... (the panel's default). Alias URLs
+# 302 to the real path; the gate follows that redirect for meta lookups and
+# connection tests, and rewrites it for stream proxies.
+MASTER_URL=http://127.0.0.1:3210/stremio/u/your-alias/manifest.json
 PUBLIC_BASE=https://stream.dill.moe
 ```
 
@@ -161,6 +166,7 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `KEY_LENGTH` | `12` | Key id length in characters (8–32) |
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |
+| `HISTORY_META_RETRY_MS` | `30000` | Min gap between title-lookup retries for a titleless history entry (1000–3600000) |
 
 ## Panel settings
 
@@ -192,11 +198,15 @@ for streams (`/go/<key>/stream/<type>/<id>.json`), the gate logs the type
 (movie/series/channel), the media id, a best-effort title (resolved from the
 master's `meta` catalog, cached), bytes served and IP. Series episodes get
 `SxxExx` + episode name when the master's meta includes them, so rows read
-"Breaking Bad · S01E02 Pilot" instead of `tt12042730`. Entries recorded while
-the master wasn't configured get one automatic retry the next time the page is
-opened. Manifest loads, catalog browsing and playback segments are **not**
-recorded, so the list is "what did this person actually try to watch", not a
-request dump.
+"Breaking Bad · S01E02 Pilot" instead of `tt12042730`. Title resolution
+follows the master's redirects (so `/stremio/u/<alias>/…` install URLs work)
+and runs in the background after the stream response, so it never slows down
+streaming. Entries that were recorded while the master was down, slow, or
+still missing a title are retried automatically each time the key's page is
+opened — at most once per `HISTORY_META_RETRY_MS` (default 30s) per entry, so
+a recovering master backfills old rows too. Manifest loads, catalog browsing
+and playback segments are **not** recorded, so the list is "what did this
+person actually try to watch", not a request dump.
 
 Logs are pruned automatically — entries older than `HISTORY_RETENTION_DAYS`
 (default **30 days**) are deleted on boot, every 6h, and after each new entry

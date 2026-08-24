@@ -15,9 +15,12 @@ services:
 
       # ── aio-gate ─────────────────────────────────────────────────────────
       # Master manifest URL (optional — can also be set in the panel Settings;
-      # panel value overrides this). Get uuid/password from your panel:
-      # Save & Install → Copy URL, then replace the host with http://127.0.0.1:3210
-      MASTER_URL: "http://127.0.0.1:3210/stremio/your-uuid/your-password/manifest.json"
+      # panel value overrides this). Get it from your panel: Save & Install →
+      # Copy URL, then replace the host with http://127.0.0.1:3210. Both the
+      # classic /stremio/<uuid>/<password>/... and the newer short alias
+      # /stremio/u/<alias>/... formats work (alias URLs 302 to the real path;
+      # the gate follows that redirect for meta/connection checks).
+      MASTER_URL: "http://127.0.0.1:3210/stremio/u/your-alias/manifest.json"
       # Public base of the gate — what key URLs are built from. Optional, too.
       PUBLIC_BASE: "https://stream.dill.moe"
       # Gate admin login. If omitted, the first AIOSTREAMS_AUTH pair is used.

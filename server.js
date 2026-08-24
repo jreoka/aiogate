@@ -59,6 +59,19 @@ const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 const HISTORY_RETENTION_MS =
   clampInt(ENV.HISTORY_RETENTION_DAYS, 30, 1, 365) * 24 * 3600 * 1000;
 const HISTORY_MAX_PER_KEY = clampInt(ENV.HISTORY_MAX_PER_KEY, 2000, 50, 50000);
+// Timeout for the best-effort title lookup against the master's /meta
+// endpoint. AIOStreams can take a while to aggregate meta, so this is
+// generous but still bounded.
+const META_FETCH_TIMEOUT_MS = 15000;
+// How long to wait before retrying a titleless history entry (the panel
+// polls every 30s, so one retry per poll at most). Configurable via
+// HISTORY_META_RETRY_MS (1000-3600000).
+const HISTORY_META_RETRY_MS = clampInt(
+  ENV.HISTORY_META_RETRY_MS,
+  30000,
+  1000,
+  3600000
+);
 const MAX_REWRITE_BYTES = 16 * 1024 * 1024;
 const LOGIN_MAX_FAILS = 10;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
@@ -555,15 +568,20 @@ function recordStream(keyRec, ref, bytes, ip) {
   pruneHistory();
   scheduleSave();
   // Best-effort title lookup, after the response — never blocks proxying.
+  // metaAttemptedAt is stamped on every outcome (success or failure) so
+  // keyHistory can retry titleless entries later without hammering the master.
   resolveMeta(keyRec, ref.type, ref.id)
     .then((info) => {
+      entry.metaAttemptedAt = Date.now();
       if (info && !entry.title) {
         entry.titleAttempted = true;
         applyMeta(entry, info);
         scheduleSave();
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      entry.metaAttemptedAt = Date.now();
+    });
 }
 
 function pruneHistory(force) {
@@ -615,24 +633,33 @@ function keyHistory(keyId, limit) {
   if (!state.history) return [];
   const out = [];
   const canResolve = !!effectiveMasterUrl();
+  const now = Date.now();
   let reattempted = 0;
   for (let i = state.history.length - 1; i >= 0 && out.length < limit; i--) {
     const e = state.history[i];
     if (e.keyId !== keyId) continue;
     out.push(e);
-    if (canResolve && !e.title && !e.titleAttempted && reattempted < 30) {
-      e.titleAttempted = true;
-      reattempted++;
-      const rec = getKey(keyId);
-      if (rec) {
-        resolveMeta(rec, e.type, e.id)
-          .then((info) => {
-            if (info && !e.title) {
-              applyMeta(e, info);
-              scheduleSave();
-            }
-          })
-          .catch(() => {});
+    // Lazy retry for titleless entries: previously this set a sticky
+    // titleAttempted flag, so a single transient failure (slow meta, alias
+    // redirect not yet supported) permanently lost the title. Now failed
+    // attempts are retried once the retry window has elapsed.
+    if (canResolve && !e.title && reattempted < 30) {
+      const lastAttempt = e.metaAttemptedAt || 0;
+      if (now - lastAttempt >= HISTORY_META_RETRY_MS) {
+        e.metaAttemptedAt = now;
+        reattempted++;
+        const rec = getKey(keyId);
+        if (rec) {
+          resolveMeta(rec, e.type, e.id)
+            .then((info) => {
+              if (info && !e.title) {
+                e.titleAttempted = true;
+                applyMeta(e, info);
+                scheduleSave();
+              }
+            })
+            .catch(() => {});
+        }
       }
     }
   }
@@ -674,42 +701,76 @@ function parseMetaInfo(data, type, id) {
 }
 
 function fetchMetaInfo(master, type, id, lookupId) {
+  return getMaster(
+    master,
+    `${master.masterRoot}/meta/${type}/${encodeURIComponent(id)}.json`,
+    META_FETCH_TIMEOUT_MS
+  ).then((res) => {
+    if (!res || res.status !== 200) return null;
+    try {
+      const data = JSON.parse(res.body);
+      // The episode-video lookup always uses the original streamed id
+      // (tt123:1:2), even when the fetched meta is the series (tt123).
+      return parseMetaInfo(data, type, lookupId || id);
+    } catch {
+      return null;
+    }
+  });
+}
+
+/**
+ * GET a path on the master, following same-origin redirects (modern
+ * AIOStreams install URLs are `/stremio/u/<alias>/...` aliases that 302 to
+ * the real `/stremio/<uuid>/<password>/...` path; node's http.get does not
+ * follow redirects on its own). Resolves `{ status, body }` with the body
+ * capped, or null on network failure / off-origin redirect. Never throws.
+ */
+function getMaster(master, path, timeoutMs) {
   return new Promise((resolve) => {
     const mod = master.protocol === 'https:' ? https : http;
-    const req = mod.get(
-      {
-        protocol: master.protocol,
-        hostname: master.hostname,
-        port: master.port,
-        path: `${master.masterRoot}/meta/${type}/${encodeURIComponent(id)}.json`,
-        timeout: 5000,
-      },
-      (upRes) => {
-        if (upRes.statusCode !== 200) {
-          upRes.resume();
-          return resolve(null);
-        }
-        const chunks = [];
-        let size = 0;
-        upRes.on('data', (c) => {
-          size += c.length;
-          if (size <= 256 * 1024) chunks.push(c);
-        });
-        upRes.on('end', () => {
-          try {
-            const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            // The episode-video lookup always uses the original streamed id
-            // (tt123:1:2), even when the fetched meta is the series (tt123).
-            resolve(parseMetaInfo(data, type, lookupId || id));
-          } catch {
-            resolve(null);
+    const fetch = (p, hops) => {
+      const req = mod.get(
+        {
+          protocol: master.protocol,
+          hostname: master.hostname,
+          port: master.port,
+          path: p,
+          timeout: timeoutMs,
+          headers: { accept: 'application/json' },
+        },
+        (upRes) => {
+          const status = upRes.statusCode || 0;
+          if (
+            status >= 300 &&
+            status < 400 &&
+            upRes.headers.location &&
+            hops > 0
+          ) {
+            upRes.resume();
+            try {
+              const next = new URL(upRes.headers.location, master.origin);
+              if (next.origin !== master.origin) return resolve(null);
+              return fetch(next.pathname + next.search, hops - 1);
+            } catch {
+              return resolve(null);
+            }
           }
-        });
-        upRes.on('error', () => resolve(null));
-      }
-    );
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', () => resolve(null));
+          const chunks = [];
+          let size = 0;
+          upRes.on('data', (c) => {
+            size += c.length;
+            if (size <= 256 * 1024) chunks.push(c);
+          });
+          upRes.on('end', () =>
+            resolve({ status, body: Buffer.concat(chunks).toString('utf8') })
+          );
+          upRes.on('error', () => resolve(null));
+        }
+      );
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.on('error', () => resolve(null));
+    };
+    fetch(path, 5);
   });
 }
 
@@ -1410,28 +1471,18 @@ function handleAdmin(req, res, pathname) {
           done = true;
           sendJson(res, status, payload);
         };
-        const mod = m.protocol === 'https:' ? https : http;
-        const probe = mod.get(
-          {
-            protocol: m.protocol,
-            hostname: m.hostname,
-            port: m.port,
-            path: m.masterRoot + '/manifest.json',
-            timeout: 6000,
-          },
-          (upRes) => {
-            const ok = upRes.statusCode >= 200 && upRes.statusCode < 300;
-            finish(ok ? 200 : 502, { ok, status: upRes.statusCode });
-            upRes.resume();
+        // Follow same-origin redirects so alias URLs (/stremio/u/<alias>/...)
+        // probe green instead of failing on the 302 hop.
+        getMaster(m, m.masterRoot + '/manifest.json', 6000).then((r) => {
+          if (!r) {
+            return finish(502, {
+              ok: false,
+              error: 'could not reach master (network error)',
+            });
           }
-        );
-        probe.on('timeout', () => {
-          probe.destroy();
-          finish(504, { ok: false, error: 'timeout' });
+          const ok = r.status >= 200 && r.status < 300;
+          finish(ok ? 200 : 502, { ok, status: r.status });
         });
-        probe.on('error', (err) =>
-          finish(502, { ok: false, error: err.message })
-        );
       })
       .catch(() => sendJson(res, 400, { error: 'invalid request' }));
   }

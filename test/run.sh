@@ -10,7 +10,7 @@ trap 'kill $MOCK_PID 2>/dev/null || true' EXIT
 sleep 0.6
 
 echo "== starting aio-gate (bundled) on :8085 =="
-MASTER_URL="http://127.0.0.1:3900/stremio/abcdef1234567890/testpassword123/manifest.json" \
+MASTER_URL="http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json" \
 AIOSTREAMS_INTERNAL_URL="http://127.0.0.1:3900" \
 BASE_URL="https://stream.dill.moe" \
 PUBLIC_BASE="http://127.0.0.1:8085" \
@@ -27,6 +27,9 @@ node test/test.js
 
 echo "== running AIOStreams-surface tests =="
 node test/test-bundled.js
+
+echo "== running watch-history title retry test =="
+node test/retry-check.js
 
 echo "== stopping =="
 kill $GATE_PID $MOCK_PID 2>/dev/null || true

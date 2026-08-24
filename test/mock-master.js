@@ -114,6 +114,17 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  // Modern AIOStreams panel "Copy URL" is an alias URL: /stremio/u/<alias>/...
+  // which 302-redirects to the real /stremio/<uuid>/<pass>/... path.
+  if (p.startsWith('/stremio/u/')) {
+    const rest = p.slice('/stremio/u/'.length);
+    const slash = rest.indexOf('/');
+    if (slash !== -1) {
+      res.writeHead(302, { location: `${ROOT}/${rest.slice(slash + 1)}` });
+      return res.end();
+    }
+  }
+
   if (p.startsWith(`${ROOT}/stream/`)) {
     return json(res, {
       streams: [

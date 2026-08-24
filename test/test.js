@@ -179,10 +179,15 @@ async function main() {
     'publicBase override in config',
     (await res.json()).publicBase === 'http://keyhost.test'
   );
-  res = await fetch(`${BASE}/go/${kid}/stream/movie/tt123.json`);
+  res = await fetch(`${BASE}/go/${kid}/stream/movie/tt123.json`, {
+    redirect: 'manual',
+  });
+  const locAfterOverride = res.headers.get('location') || '';
   check(
     'rewrites use overridden base',
-    (await res.text()).includes('http://keyhost.test/go/')
+    (res.status === 302 && locAfterOverride.includes('http://keyhost.test/go/')) ||
+      (res.status === 200 && (await res.text()).includes('http://keyhost.test/go/')),
+    `status=${res.status} loc=${locAfterOverride}`
   );
 
   // override master -> proxying follows it (dead host -> 502)
@@ -196,16 +201,21 @@ async function main() {
   res = await fetch(`${BASE}/go/${kid}/manifest.json`);
   check('bad master override -> 502', res.status === 502, res.status);
 
-  // connection tester
+  // connection tester (alias URL -> 302 -> must still probe green)
   res = await fetch(`${BASE}/panel/api/settings/test`, {
     method: 'POST',
     headers: authHeaders,
     body: JSON.stringify({
       masterUrl:
-        'http://127.0.0.1:3900/stremio/abcdef1234567890/testpassword123/manifest.json',
+        'http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json',
     }),
   });
-  check('settings test ok against mock', (await res.json()).ok === true);
+  const probeRes = await res.json();
+  check(
+    'settings test ok against mock (alias URL)',
+    probeRes.ok === true && probeRes.status === 200,
+    JSON.stringify(probeRes)
+  );
   res = await fetch(`${BASE}/panel/api/settings/test`, {
     method: 'POST',
     headers: authHeaders,
