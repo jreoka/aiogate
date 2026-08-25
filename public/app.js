@@ -14,7 +14,6 @@ const state = {
   sessionTtlDays: 7,
   twoFactorEnabled: false,
   currentSessionId: null,
-  live: { active: 0, keys: {} },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -314,7 +313,6 @@ function renderDash() {
         <div class="stat"><div class="num amber">${counts.paused}</div><div class="lbl">Paused</div></div>
         <div class="stat"><div class="num red">${counts.revoked}</div><div class="lbl">Revoked</div></div>
         <div class="stat"><div class="num">${fmtCount(todayReq)}</div><div class="lbl">Requests today</div></div>
-        <div class="stat"><div class="num" id="stat-live">${state.live.active || 0}</div><div class="lbl">Streams now</div></div>
       </section>
 
       <section class="panel">
@@ -385,53 +383,6 @@ function renderDash() {
 
   renderTable();
   $('#refresh-hint').textContent = 'auto-refreshes';
-  applyLive(state.live);
-}
-
-/* Live "watching" state: green lights per key + the Streams now stat.
- * Rendered from state.live (fresh from api/status every 10s on the dash). */
-function applyLive(live) {
-  state.live = live || state.live;
-  const num = $('#stat-live');
-  if (num) {
-    num.textContent = state.live.active || 0;
-    num.className = 'num' + (state.live.active ? ' green' : '');
-  }
-  document.querySelectorAll('[data-live]').forEach((el) => {
-    const n = (state.live.keys || {})[el.dataset.live] || 0;
-    el.innerHTML = n
-      ? `<span class="live-dot"></span> ${n}`
-      : '<span class="faint">—</span>';
-    el.title = n
-      ? `Watching now · ${n} stream${n === 1 ? '' : 's'}`
-      : 'Not watching';
-  });
-}
-
-async function pollLive() {
-  if (state.view === 'dash') {
-    try {
-      const s = await api('api/status');
-      if (state.view === 'dash') applyLive(s);
-    } catch (err) {
-      if (err.status === 401) renderLogin();
-    }
-  } else if (state.view === 'key' && state.currentKeyId) {
-    // Keep the history rows' green lights fresh (which media is streaming).
-    try {
-      const histRes = await api(`api/keys/${state.currentKeyId}/history`);
-      if (state.view === 'key' && state.currentKeyId) {
-        state.currentHistory = histRes.entries || [];
-        const filterEl = $('#hist-filter');
-        renderHistTable(
-          state.currentHistory,
-          filterEl ? filterEl.value.trim().toLowerCase() : ''
-        );
-      }
-    } catch (err) {
-      if (err.status === 401) renderLogin();
-    }
-  }
 }
 
 function renderTable() {
@@ -442,7 +393,6 @@ function renderTable() {
   const head = `<thead><tr>
       <th>Label</th>
       <th>Status</th>
-      <th>Now</th>
       <th>Expires</th>
       <th>Created</th>
       <th>Usage</th>
@@ -459,10 +409,6 @@ function renderTable() {
         : '—';
       const lastIp = k.usage.lastIp ? ` · ${esc(k.usage.lastIp)}` : '';
       const pagePath = '/panel/' + (slugs.byId.get(k.id) || k.id);
-      const liveN = (state.live.keys || {})[k.id] || 0;
-      const nowCell = liveN
-        ? `<span class="live-dot"></span> ${liveN}`
-        : '<span class="faint">—</span>';
 
       return `<tr>
         <td>
@@ -470,7 +416,6 @@ function renderTable() {
           ${k.note ? `<div class="note-cell">${esc(k.note)}</div>` : ''}
         </td>
         <td><span class="pill ${st}">${st}</span></td>
-        <td><span class="live-cell" data-live="${k.id}" title="${liveN ? `Watching now · ${liveN} stream${liveN === 1 ? '' : 's'}` : 'Not watching'}">${nowCell}</span></td>
         <td class="faint">${expireText}</td>
         <td class="faint">${relTime(k.createdAt)}</td>
         <td class="faint">
@@ -487,7 +432,7 @@ function renderTable() {
     })
     .join('');
 
-  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="7"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
+  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="6"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
 
   wrap.querySelectorAll('a[data-act]').forEach((a) => {
     a.addEventListener('click', (e) => {
@@ -1188,7 +1133,6 @@ function renderKeyPage() {
             <div class="meta"><div class="num">${lastUsed}</div><div class="lbl">Last used</div></div>
             <div class="meta"><div class="num">${k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : '—'}</div><div class="lbl">Expires</div></div>
             <div class="meta"><div class="num">${relTime(k.createdAt)}</div><div class="lbl">Created</div></div>
-            <div class="meta"><div class="num ${k.watching ? 'green' : ''}">${k.watching ? `<span class="live-dot"></span> ${k.activeStreams}` : '—'}</div><div class="lbl">Watching now</div></div>
           </div>
         </div>
       </section>
@@ -1298,16 +1242,11 @@ function renderHistTable(entries, q) {
         ? `<div class="faint" style="font-size:11px">${esc(e.id)}</div>`
         : '';
       const epPart = ep ? `<div class="hist-ep">${esc(ep)}</div>` : '';
-      // Green light: this media is streaming right now (a history row can
-      // have several live sessions, e.g. the same movie on two devices).
-      const liveDot = e.live
-        ? `<span class="live-dot" title="Streaming now${e.live > 1 ? ` · ${e.live} streams` : ''}"></span> `
-        : '';
       return `<tr>
         <td class="faint" style="white-space:nowrap">${relTime(e.ts)}</td>
         <td><span class="badge">${esc(e.type)}</span></td>
         <td>
-          <div class="hist-title">${liveDot}${esc(title)}</div>
+          <div class="hist-title">${esc(title)}</div>
           ${epPart}
           ${idPart}
         </td>
@@ -1372,9 +1311,5 @@ setInterval(() => {
   else if (state.view === 'key') refreshKey();
   else if (state.view === 'sessions') refreshSessions();
 }, 30_000);
-
-// Live green lights: dashboard "Now" dots + Streams-now widget, and the
-// key page's watch-history "streaming now" dots — refreshed every 10s.
-setInterval(pollLive, 10_000);
 
 boot();

@@ -10,7 +10,6 @@ internet.
 - 📺 Per-key **watch history**: every key's page shows what media it streamed (movie/series ids, titles, when, how much data), auto-deleted after **30 days** to save space
 - 🔒 The master manifest URL (uuid/password) never appears in anything handed out — the gate proxies and rewrites it out of every response
 - 📊 Per-key usage stats: requests, bandwidth (**last 30 days + lifetime**), last used, last IP
-- 🟢 Live **"watching" lights**: any key currently playing media shows a green dot (with a stream count), a **Streams now** widget on the dashboard totals live streams across every key, and each key's **watch history** lights up the row(s) for media streaming right now — handy when a key runs several concurrent streams
 - 🐳 **One container**: AIOStreams + gate together, one volume, AIOStreams panel only reachable through the gate's admin login
 
 ---
@@ -168,7 +167,6 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |
 | `HISTORY_META_RETRY_MS` | `30000` | Min gap between title-lookup retries for a titleless history entry (1000–3600000) |
-| `STREAM_IDLE_MS` | `120000` | How long a playback session stays "watching" after its last request (the player re-fetches HLS playlists/segments every few seconds while playing). After this window the green lights go off (1000–3600000) |
 | `TITLE_IMDB_FALLBACK` | `1` | When the master can't serve meta, look the title up on IMDb's suggestion API for `tt*` ids (`0` disables) |
 | `IMDB_SUGGEST_URL` | `https://v2.sg.media-imdb.com` | Base URL of the IMDb suggestion API (mainly useful for tests/self-hosted mirrors) |
 
@@ -224,40 +222,6 @@ Logs are pruned automatically — entries older than `HISTORY_RETENTION_DAYS`
 (default **30 days**) are deleted on boot, every 6h, and after each new entry
 (a per-key safety cap of `HISTORY_MAX_PER_KEY`, default 2000, applies too).
 Deleting a key deletes its history with it.
-
-## Live streams ("watching now" green lights)
-
-The gate watches **actual playback traffic** to know who is watching right now.
-When Stremio plays something routed through the gate
-(`/go/<key>/raw/api/v1/debrid/playback/...` — the playlist and its segments),
-the gate registers one **stream session** for that media and keeps it alive
-while the requests keep coming. Stream *lookups* (`/stream/...json`) are just
-browsing and never count.
-
-- **Green lights** — the dashboard shows a pulsing green dot next to every
-  key that has an active session (with the stream count in the **Now**
-  column), and a **Streams now** stat card totals live streams across all
-  keys. Both refresh every 10 seconds; each key's page shows the same
-  live state. A session expires `STREAM_IDLE_MS` (default **2 minutes**)
-  after the last request — a stopped or player-paused stream turns its
-  light off automatically.
-- **History lights** — each key's **watch history** marks the row(s) for
-  media streaming right now with a green dot (showing the session count
-  when several are playing the same title), so with a key running multiple
-  concurrent streams you can see at a glance which history entries are
-  live. New playback sessions are linked to the key's most recent matching
-  history entry (same client IP, recorded within the last 30 minutes); the
-  player sends no explicit stop/pause signal, so a light follows the
-  session's traffic and goes off after `STREAM_IDLE_MS` of silence.
-- **Pause clears lights immediately** — pausing (or revoking) a key from
-  the panel clears its live sessions right away; deleting a key clears
-  them too.
-
-> **Direct-CDN caveat:** a stream whose playback URL points straight at the
-> debrid CDN (TorBox etc., passed through untouched) generates no gate
-> traffic, so the gate can't see it — no green light. Anything routed
-> through your instance (the default AIOStreams behavior) is tracked
-> precisely.
 
 ## Sessions & two-factor authentication
 
