@@ -96,18 +96,6 @@ function relTime(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
-function fmtBytes(b) {
-  if (!b) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = b;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
-}
-
 function fmtCount(n) {
   if (!n) return '0';
   return n.toLocaleString();
@@ -401,8 +389,6 @@ function renderTable() {
   const bodyRows = state.keys
     .map((k) => {
       const st = keyStatus(k);
-      const statText = `${fmtCount(k.usage.requests)} req · ${fmtBytes(k.usage.bytes)} total`;
-      const stat30 = `${fmtBytes(k.usage.bytes30d || 0)} last 30 days`;
       const expireText = k.expiresAt
         ? `${st === 'expired' ? 'expired ' : ''}${new Date(k.expiresAt).toLocaleDateString()}`
         : '—';
@@ -418,8 +404,7 @@ function renderTable() {
         <td class="faint">${expireText}</td>
         <td class="faint">${relTime(k.createdAt)}</td>
         <td class="faint">
-          <div>${statText}</div>
-          <div>${stat30}</div>
+          <div>${fmtCount(k.usage.requests)} requests</div>
           <div class="faint" style="font-size:11px">${relTime(k.usage.lastUsedAt)}${lastIp}</div>
         </td>
         <td>
@@ -1126,8 +1111,6 @@ function renderKeyPage() {
             </div>
           </div>
           <div class="meta-grid">
-            <div class="meta"><div class="num">${fmtBytes(k.usage.bytes30d || 0)}</div><div class="lbl">Bandwidth · last 30 days</div></div>
-            <div class="meta"><div class="num">${fmtBytes(k.usage.bytes)}</div><div class="lbl">Bandwidth · lifetime</div></div>
             <div class="meta"><div class="num">${fmtCount(k.usage.requests)}</div><div class="lbl">Requests</div></div>
             <div class="meta"><div class="num">${lastUsed}</div><div class="lbl">Last used</div></div>
             <div class="meta"><div class="num">${k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : '—'}</div><div class="lbl">Expires</div></div>
@@ -1249,7 +1232,6 @@ function renderHistTable(entries, q) {
           ${epPart}
           ${idPart}
         </td>
-        <td class="faint">${fmtBytes(e.bytes)}</td>
         ${e.ip ? `<td class="faint">${esc(e.ip)}</td>` : '<td></td>'}
       </tr>`;
     })
@@ -1257,9 +1239,9 @@ function renderHistTable(entries, q) {
 
   wrap.innerHTML = `<table class="keys">
     <thead><tr>
-      <th>When</th><th>Type</th><th>Media</th><th>Served</th><th>IP</th>
+      <th>When</th><th>Type</th><th>Media</th><th>IP</th>
     </tr></thead>
-    <tbody>${rows || `<tr><td colspan="5"><div class="empty">Nothing streamed yet for this key — entries appear here when Stremio asks it for streams.</div></td></tr>`}</tbody>
+    <tbody>${rows || `<tr><td colspan="4"><div class="empty">Nothing streamed yet for this key — entries appear here when Stremio asks it for streams.</div></td></tr>`}</tbody>
   </table>`;
 }
 

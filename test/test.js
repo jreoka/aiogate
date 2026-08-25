@@ -150,9 +150,6 @@ async function main() {
   const { keys } = await res.json();
   const k = keys.find((x) => x.id === kid);
   check('usage requests counted', k.usage.requests >= 8, `got ${k.usage.requests}`);
-  check('usage bytes counted', k.usage.bytes >= 128 * 1024, `got ${k.usage.bytes}`);
-  check('usage bytes30d reported', typeof k.usage.bytes30d === 'number' && k.usage.bytes30d >= 128 * 1024, `got ${k.usage.bytes30d}`);
-  check('usage bytes30d <= lifetime bytes', k.usage.bytes30d <= k.usage.bytes, `30d=${k.usage.bytes30d} total=${k.usage.bytes}`);
   check('lastUsedAt set', !!k.usage.lastUsedAt);
 
   // --- runtime settings (master URL + public base from the panel) ---

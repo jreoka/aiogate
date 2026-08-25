@@ -289,6 +289,18 @@ function loadState() {
       if (!Array.isArray(parsed.history)) parsed.history = [];
       if (!parsed.sessions || typeof parsed.sessions !== 'object')
         parsed.sessions = {};
+      // Strip legacy bandwidth-tracking fields (bytes / daily buckets) from
+      // data files written by older versions. Requests / last-used remain.
+      for (const key of Object.values(parsed.keys)) {
+        if (key.usage) {
+          delete key.usage.bytes;
+          delete key.usage.bytes30d;
+          delete key.usage.daily;
+        }
+      }
+      if (Array.isArray(parsed.history)) {
+        for (const e of parsed.history) delete e.bytes;
+      }
       state = parsed;
       return;
     }
@@ -663,7 +675,7 @@ function createKey(fields) {
     expiresAt: fields.expiresAt || null,
     createdAt: nowIso(),
     updatedAt: nowIso(),
-    usage: { requests: 0, bytes: 0, lastUsedAt: null, lastIp: null },
+    usage: { requests: 0, lastUsedAt: null, lastIp: null },
   };
   state.keys[id] = key;
   saveStateSync(); // admin mutations persist immediately
@@ -708,51 +720,11 @@ function deleteKey(id) {
   return true;
 }
 
-function dayKey(ms) {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
-/** Drop daily bandwidth buckets older than 30 days. True if anything was removed. */
-function pruneDaily(daily) {
-  const cutoff = dayKey(Date.now() - 30 * 86400000);
-  let changed = false;
-  for (const d of Object.keys(daily)) {
-    if (d < cutoff) {
-      delete daily[d];
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/** Bytes transferred by this key in the last 30 days (rolling daily buckets). */
-function bytes30d(key) {
-  const daily = key.usage && key.usage.daily;
-  if (!daily) return 0;
-  const cutoff = dayKey(Date.now() - 30 * 86400000);
-  let total = 0;
-  for (const [d, b] of Object.entries(daily)) {
-    if (d >= cutoff && typeof b === 'number') total += b;
-  }
-  return total;
-}
-
-/** Key as served to the admin API — usage augmented with the 30-day view. */
-function serializeKey(key) {
-  return { ...key, usage: { ...key.usage, bytes30d: bytes30d(key) } };
-}
-
-function touchKey(key, bytes, ip) {
+function touchKey(key, ip) {
   const u = key.usage;
   u.requests += 1;
-  u.bytes += bytes || 0;
   u.lastUsedAt = nowIso();
   u.lastIp = ip || null;
-  // Rolling per-day bandwidth buckets power the "last 30 days" stat.
-  if (!u.daily) u.daily = {};
-  const today = dayKey(Date.now());
-  u.daily[today] = (u.daily[today] || 0) + (bytes || 0);
-  pruneDaily(u.daily);
   scheduleSave();
 }
 
@@ -802,7 +774,7 @@ function applyMeta(entry, info) {
   }
 }
 
-function recordStream(keyRec, ref, bytes, ip) {
+function recordStream(keyRec, ref, ip) {
   if (!state.history) state.history = [];
   const entry = {
     keyId: keyRec.id,
@@ -814,7 +786,6 @@ function recordStream(keyRec, ref, bytes, ip) {
     episodeNumber: null,
     episodeName: null,
     titleAttempted: false,
-    bytes: bytes || 0,
     ip: ip || null,
   };
   state.history.push(entry);
@@ -841,14 +812,6 @@ function pruneHistory(force) {
   const now = Date.now();
   if (!force && now - lastPruneAt < 60_000) return; // at most once a minute
   lastPruneAt = now;
-  // Roll old daily bandwidth buckets off every key too.
-  let dailyChanged = false;
-  for (const key of Object.values(state.keys)) {
-    if (key.usage && key.usage.daily && pruneDaily(key.usage.daily)) {
-      dailyChanged = true;
-    }
-  }
-  if (dailyChanged) scheduleSave();
   if (!state.history || !state.history.length) return;
   const cutoff = now - HISTORY_RETENTION_MS;
   let kept = state.history.filter((e) => {
@@ -1291,10 +1254,10 @@ function hasDotSegment(suffix) {
     .some((seg) => seg === '..' || seg === '%2e%2e' || /^\.{2,}$/.test(seg));
 }
 
-function logHit(keyId, req, status, bytes, ms) {
+function logHit(keyId, req, status, ms) {
   const shortKey = keyId ? keyId.slice(0, 6) : '-';
   console.log(
-    `[${new Date().toISOString()}] key=${shortKey} ${req.method} ${req.url} -> ${status} (${bytes}b, ${ms}ms)`
+    `[${new Date().toISOString()}] key=${shortKey} ${req.method} ${req.url} -> ${status} (${ms}ms)`
   );
 }
 
@@ -1387,14 +1350,13 @@ function forward(req, res, keyRec, suffix) {
         outHeaders[k] = v;
       }
 
-      let bytes = 0;
       const finish = (statusCode) => {
-        touchKey(keyRec, bytes, ip);
-        logHit(keyRec.id, req, statusCode, bytes, Date.now() - started);
+        touchKey(keyRec, ip);
+        logHit(keyRec.id, req, statusCode, Date.now() - started);
         // Record what media this key asked to stream (successful lookups only).
         if (statusCode >= 200 && statusCode < 400) {
           const ref = parseStreamRef(suffix);
-          if (ref) recordStream(keyRec, ref, bytes, ip);
+          if (ref) recordStream(keyRec, ref, ip);
         }
       };
 
@@ -1410,7 +1372,6 @@ function forward(req, res, keyRec, suffix) {
         let size = 0;
         let exceeded = false;
         upRes.on('data', (c) => {
-          bytes += c.length;
           size += c.length;
           if (!exceeded) {
             if (size <= MAX_REWRITE_BYTES) chunks.push(c);
@@ -1445,7 +1406,6 @@ function forward(req, res, keyRec, suffix) {
         });
       } else {
         res.writeHead(status, outHeaders);
-        upRes.on('data', (c) => (bytes += c.length));
         upRes.pipe(res);
         upRes.on('error', () => res.destroy());
         res.once('close', () => {
@@ -1471,7 +1431,7 @@ function forward(req, res, keyRec, suffix) {
         'content-type': 'application/json; charset=utf-8',
       });
       res.end(JSON.stringify({ error: 'gate: upstream request failed' }));
-      logHit(keyRec.id, req, 502, 0, Date.now() - started);
+      logHit(keyRec.id, req, 502, Date.now() - started);
     } else {
       res.destroy();
     }
@@ -1672,7 +1632,7 @@ function handleProxy(req, res, pathname) {
   }
   const segments = decoded.split('/').filter(Boolean);
   if (segments.length > 0 && segments[segments.length - 1] === 'configure') {
-    touchKey(keyRec, 0, clientIp(req));
+    touchKey(keyRec, clientIp(req));
     serveManagedPage(res);
     return;
   }
@@ -1869,7 +1829,7 @@ function handleAdmin(req, res, pathname) {
 
   // GET /panel/api/keys
   if (parts.length === 3 && parts[2] === 'keys' && req.method === 'GET') {
-    sendJson(res, 200, { keys: listKeys().map(serializeKey) });
+    sendJson(res, 200, { keys: listKeys() });
     return;
   }
 
@@ -1923,7 +1883,7 @@ function handleAdmin(req, res, pathname) {
   ) {
     const key = getKey(parts[3]);
     if (!key) return sendJson(res, 404, { error: 'not found' });
-    sendJson(res, 200, { key: serializeKey(key) });
+    sendJson(res, 200, { key });
     return;
   }
 

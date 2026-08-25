@@ -7,9 +7,9 @@ internet.
 
 - 🔑 Each person gets their own key URL: `https://gate.example/go/<key>/manifest.json`
 - ⏸ Pause, ▶ resume, or ❌ revoke any key from a flat, OLED-black admin panel — no AIOStreams changes needed
-- 📺 Per-key **watch history**: every key's page shows what media it streamed (movie/series ids, titles, when, how much data), auto-deleted after **30 days** to save space
+- 📺 Per-key **watch history**: every key's page shows what media it streamed (movie/series ids, titles, when, from which IP), auto-deleted after **30 days** to save space
 - 🔒 The master manifest URL (uuid/password) never appears in anything handed out — the gate proxies and rewrites it out of every response
-- 📊 Per-key usage stats: requests, bandwidth (**last 30 days + lifetime**), last used, last IP
+- 📊 Per-key usage stats: requests, last used, last IP
 - 🐳 **One container**: AIOStreams + gate together, one volume, AIOStreams panel only reachable through the gate's admin login
 
 ---
@@ -198,7 +198,7 @@ instead of cluttering the dashboard table.
 The same page shows a **Watch history** table: every time Stremio asks the key
 for streams (`/go/<key>/stream/<type>/<id>.json`), the gate logs the type
 (movie/series/channel), the media id, a best-effort title (resolved from the
-master's `meta` catalog, cached), bytes served and IP. Series episodes get
+master's `meta` catalog, cached) and IP. Series episodes get
 `SxxExx` + episode name when the master's meta includes them, so rows read
 "Breaking Bad · S01E02 Pilot" instead of `tt12042730`. Title resolution
 follows the master's redirects (so `/stremio/u/<alias>/…` install URLs work)
