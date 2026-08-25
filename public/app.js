@@ -279,7 +279,7 @@ async function renderLogin() {
 
 function renderDash() {
   state.view = 'dash';
-  const counts = { active: 0, paused: 0, revoked: 0, expired: 0 };
+  const counts = { active: 0, paused: 0, expired: 0 };
   let todayReq = 0;
   const startOfDay = new Date().setHours(0, 0, 0, 0);
   for (const k of state.keys) {
@@ -311,7 +311,6 @@ function renderDash() {
       <section class="stats">
         <div class="stat"><div class="num green">${counts.active}</div><div class="lbl">Active keys</div></div>
         <div class="stat"><div class="num amber">${counts.paused}</div><div class="lbl">Paused</div></div>
-        <div class="stat"><div class="num red">${counts.revoked}</div><div class="lbl">Revoked</div></div>
         <div class="stat"><div class="num">${fmtCount(todayReq)}</div><div class="lbl">Requests today</div></div>
       </section>
 
