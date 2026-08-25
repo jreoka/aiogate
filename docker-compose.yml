@@ -32,7 +32,12 @@ services:
       # Public port the gate binds:
       # PORT: "3000"
       # KEY_LENGTH: "12"
-      # TRUST_PROXY: "0"
+      # Proxy trust is ON by default: X-Forwarded-For / X-Real-IP give the
+      # real client IP (key info, sessions, history, login rate-limiting)
+      # instead of the proxy/container IP. Set TRUST_PROXY: "0" only if port
+      # 3000 is exposed directly with no proxy in front, or clients can spoof
+      # those headers.
+      # TRUST_PROXY: "1"
 
     volumes:
       - ./data:/app/data

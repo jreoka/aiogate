@@ -393,7 +393,6 @@ function renderTable() {
   const head = `<thead><tr>
       <th>Label</th>
       <th>Status</th>
-      <th>Master</th>
       <th>Expires</th>
       <th>Created</th>
       <th>Usage</th>
@@ -405,9 +404,6 @@ function renderTable() {
       const st = keyStatus(k);
       const statText = `${fmtCount(k.usage.requests)} req · ${fmtBytes(k.usage.bytes)} total`;
       const stat30 = `${fmtBytes(k.usage.bytes30d || 0)} last 30 days`;
-      const masterBadge = k.masterUrl
-        ? '<span class="badge">custom master</span>'
-        : '<span class="badge" style="color:#5c5c64;border-color:var(--border);background:var(--surface-2)">default</span>';
       const expireText = k.expiresAt
         ? `${st === 'expired' ? 'expired ' : ''}${new Date(k.expiresAt).toLocaleDateString()}`
         : '—';
@@ -420,7 +416,6 @@ function renderTable() {
           ${k.note ? `<div class="note-cell">${esc(k.note)}</div>` : ''}
         </td>
         <td><span class="pill ${st}">${st}</span></td>
-        <td>${masterBadge}</td>
         <td class="faint">${expireText}</td>
         <td class="faint">${relTime(k.createdAt)}</td>
         <td class="faint">
@@ -437,7 +432,7 @@ function renderTable() {
     })
     .join('');
 
-  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="7"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
+  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="6"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
 
   wrap.querySelectorAll('a[data-act]').forEach((a) => {
     a.addEventListener('click', (e) => {
@@ -465,10 +460,6 @@ function openEditModal(key) {
         <input id="e-note" type="text" value="${esc(key.note || '')}" placeholder="optional">
       </div>
       <div class="field">
-        <label for="e-master">Master URL override</label>
-        <input id="e-master" type="url" value="${esc(key.masterUrl || '')}" placeholder="leave empty = default master">
-      </div>
-      <div class="field">
         <label for="e-expiry">Expires</label>
         <input id="e-expiry" type="datetime-local" value="${key.expiresAt ? toLocalInput(key.expiresAt) : ''}">
       </div>
@@ -483,7 +474,6 @@ function openEditModal(key) {
     const patch = {
       label: $('#e-label').value.trim() || key.label,
       note: $('#e-note').value.trim(),
-      masterUrl: $('#e-master').value.trim() || null,
     };
     const raw = $('#e-expiry').value;
     const d = raw ? new Date(raw) : null;
@@ -1143,7 +1133,6 @@ function renderKeyPage() {
             <div class="meta"><div class="num">${lastUsed}</div><div class="lbl">Last used</div></div>
             <div class="meta"><div class="num">${k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : '—'}</div><div class="lbl">Expires</div></div>
             <div class="meta"><div class="num">${relTime(k.createdAt)}</div><div class="lbl">Created</div></div>
-            <div class="meta"><div class="num">${k.masterUrl ? 'custom master' : 'default'}</div><div class="lbl">Master</div></div>
           </div>
         </div>
       </section>

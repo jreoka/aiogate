@@ -52,7 +52,7 @@ const SESSION_SECRET =
 const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
 const PUBLIC_BASE = (ENV.PUBLIC_BASE || '').replace(/\/+$/, '');
-const TRUST_PROXY = isTruthy(ENV.TRUST_PROXY);
+const TRUST_PROXY = !isFalsy(ENV.TRUST_PROXY);
 const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 // Watch history retention: entries older than this are pruned automatically
 // to keep the data file small. Configurable via HISTORY_RETENTION_DAYS.
@@ -171,6 +171,10 @@ function isTruthy(v) {
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
+function isFalsy(v) {
+  return v === '0' || v === 'false' || v === 'no' || v === 'off';
+}
+
 function clampInt(v, def, min, max) {
   const n = parseInt(v, 10);
   if (Number.isNaN(n)) return def;
@@ -189,7 +193,26 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+/**
+ * Best-effort client IP.
+ *
+ * The direct TCP peer (req.socket.remoteAddress) is only the real client when
+ * nothing sits in front. Behind a reverse proxy or Docker bridge it is the
+ * proxy/bridge address (e.g. 172.17.0.1), so by default (TRUST_PROXY on)
+ * we honor X-Forwarded-For (first hop = original client) and fall back to
+ * X-Real-IP. Those headers are never trusted with TRUST_PROXY=0, or a
+ * client could spoof them (and bypass IP-based login rate limiting).
+ */
 function clientIp(req) {
+  if (TRUST_PROXY) {
+    const fwd = req.headers['x-forwarded-for'];
+    if (fwd) {
+      const first = String(fwd).split(',')[0].trim();
+      if (first) return first;
+    }
+    const real = req.headers['x-real-ip'];
+    if (real && String(real).trim()) return String(real).trim();
+  }
   return (req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
@@ -637,7 +660,6 @@ function createKey(fields) {
     label: String(fields.label || 'Key ' + id.slice(0, 6)),
     note: String(fields.note || ''),
     status: 'active',
-    masterUrl: fields.masterUrl || null,
     expiresAt: fields.expiresAt || null,
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -660,21 +682,6 @@ function updateKey(id, patch) {
       throw err;
     }
     key.status = patch.status;
-  }
-  if (patch.masterUrl !== undefined) {
-    const v = (patch.masterUrl || '').trim();
-    if (v) {
-      try {
-        parseMaster(v); // validate
-        key.masterUrl = v;
-      } catch {
-        const err = new Error('invalid masterUrl');
-        err.status = 400;
-        throw err;
-      }
-    } else {
-      key.masterUrl = null;
-    }
   }
   if (patch.expiresAt !== undefined) {
     const v = (patch.expiresAt || '').trim();
@@ -816,7 +823,7 @@ function recordStream(keyRec, ref, bytes, ip) {
   // Best-effort title lookup, after the response — never blocks proxying.
   // metaAttemptedAt is stamped on every outcome (success or failure) so
   // keyHistory can retry titleless entries later without hammering the master.
-  resolveMeta(keyRec, ref.type, ref.id)
+  resolveMeta(ref.type, ref.id)
     .then((info) => {
       entry.metaAttemptedAt = Date.now();
       if (info && !entry.title) {
@@ -896,7 +903,7 @@ function keyHistory(keyId, limit) {
         reattempted++;
         const rec = getKey(keyId);
         if (rec) {
-          resolveMeta(rec, e.type, e.id)
+          resolveMeta(e.type, e.id)
             .then((info) => {
               if (info && !e.title) {
                 e.titleAttempted = true;
@@ -1043,11 +1050,10 @@ function getMaster(master, path, timeoutMs) {
  * transient failure (master not configured yet, slow meta) isn't sticky.
  * Never throws.
  */
-function resolveMeta(keyRec, type, id) {
+function resolveMeta(type, id) {
   const cacheKey = `${type}:${id}`;
   if (titleCache.has(cacheKey)) return Promise.resolve(titleCache.get(cacheKey));
-  const masterUrl =
-    (keyRec.masterUrl && keyRec.masterUrl.trim()) || effectiveMasterUrl();
+  const masterUrl = effectiveMasterUrl();
   let master;
   try {
     master = parseMaster(masterUrl);
@@ -1301,9 +1307,7 @@ function forward(req, res, keyRec, suffix) {
   const ip = clientIp(req);
   const gateBase = getGateBase(req);
 
-  // Per-key override -> panel-level override -> env fallback.
-  const masterUrl =
-    (keyRec.masterUrl && keyRec.masterUrl.trim()) || effectiveMasterUrl();
+  const masterUrl = effectiveMasterUrl();
   if (!masterUrl) {
     sendJson(res, 503, {
       error: 'gate: master not configured — set MASTER_URL in Settings',

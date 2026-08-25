@@ -162,7 +162,7 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `HOST` | `0.0.0.0` | Listen address |
 | `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (container sets `/app/data/keys.json`) |
 | `REWRITE_ORIGINS` | master origin (+`BASE_URL`/internal) | Extra origins to rewrite to the gate |
-| `TRUST_PROXY` | `0` | Honor `X-Forwarded-Proto`/`Host` (only behind a trusted proxy) |
+| `TRUST_PROXY` | `1` | Honor `X-Forwarded-Proto`/`Host` and `X-Forwarded-For`/`X-Real-IP` (real client IPs in key info, sessions, history, login rate-limiting). On by default — set `0` only if the gate is directly exposed with no proxy in front, so clients can't spoof those headers |
 | `KEY_LENGTH` | `12` | Key id length in characters (8–32) |
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |
