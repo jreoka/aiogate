@@ -416,6 +416,60 @@ table.keys tbody tr:hover { background: var(--surface-2); }
 
 .hist-ep { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
+/* ---------- sessions & security ---------- */
+
+.sec-desc { color: var(--muted); font-size: 13px; margin: 0 0 16px; max-width: 640px; }
+
+.modal-wide { max-width: 520px; }
+
+.tfa-secret {
+  font-family: var(--mono);
+  font-size: 17px;
+  letter-spacing: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  text-align: center;
+  color: var(--accent);
+  user-select: all;
+  word-break: break-all;
+}
+
+.otpauth-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  display: inline-block;
+  margin-top: 4px;
+  word-break: break-all;
+  max-width: 100%;
+}
+
+.code-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
+.code-grid code {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: .5px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  text-align: center;
+  user-select: all;
+}
+
 /* ---------- modal ---------- */
 
 .modal-overlay {

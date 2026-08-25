@@ -10,6 +10,10 @@ const state = {
   currentKey: null,
   currentHistory: [],
   retentionDays: 30,
+  sessions: [],
+  sessionTtlDays: 7,
+  twoFactorEnabled: false,
+  currentSessionId: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -37,6 +41,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error((data && data.error) || `HTTP ${res.status}`);
     err.status = res.status;
+    if (data && data.twoFactorRequired) err.twoFactorRequired = true;
     throw err;
   }
   return data;
@@ -204,8 +209,18 @@ function route() {
 
 /* ---------- views ---------- */
 
-function renderLogin() {
+async function renderLogin() {
   state.view = 'login';
+  // Show the 2FA code field up front when the server has it enabled.
+  let needCode = false;
+  try {
+    const st = await api('api/auth-status');
+    needCode = !!st.twoFactorEnabled;
+  } catch {
+    /* server will prompt with twoFactorRequired on submit if needed */
+  }
+  state.twoFactorEnabled = needCode;
+
   $('#app').innerHTML = `
     <div class="login-wrap">
       <form class="login-card" id="login-form">
@@ -221,6 +236,10 @@ function renderLogin() {
         <div class="field">
           <label for="password">Password</label>
           <input id="password" type="password" autocomplete="current-password">
+        </div>
+        <div class="field" id="code-field" style="display:${needCode ? 'block' : 'none'}">
+          <label for="code">Two-factor code ${needCode ? '' : '(required after enabling 2FA)'}</label>
+          <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or recovery code" maxlength="12" spellcheck="false">
         </div>
         <button class="btn btn-primary login-btn" type="submit">Sign in</button>
         <p class="form-error" id="login-error"></p>
@@ -239,11 +258,20 @@ function renderLogin() {
         body: JSON.stringify({
           username: $('#username').value,
           password: $('#password').value,
+          code: $('#code') && $('#code').value.trim(),
         }),
       });
       await boot();
     } catch (err) {
-      errEl.textContent = err.message || 'Sign in failed';
+      // 2FA is on but the code field wasn't shown (stale status) — reveal it.
+      if (err.status === 401 && err.twoFactorRequired) {
+        state.twoFactorEnabled = true;
+        const f = $('#code-field');
+        if (f) f.style.display = 'block';
+        errEl.textContent = 'Enter your two-factor code to finish signing in';
+      } else {
+        errEl.textContent = err.message || 'Sign in failed';
+      }
       btn.disabled = false;
     }
   });
@@ -270,6 +298,7 @@ function renderDash() {
         <div class="grow"></div>
         <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
         <span class="user-chip">${esc(state.username)}</span>
+        <button class="btn btn-sm btn-ghost" id="sessions-btn">Sessions</button>
         <button class="btn btn-sm btn-ghost" id="settings-btn">Settings</button>
         <a class="btn btn-sm" href="/?aiostreams=1" target="_blank" rel="noopener">AIOStreams panel ↗</a>
         <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
@@ -318,6 +347,7 @@ function renderDash() {
     renderLogin();
   });
 
+  $('#sessions-btn').addEventListener('click', loadSessions);
   $('#settings-btn').addEventListener('click', loadSettings);
   const bannerLink = $('#banner-settings');
   if (bannerLink) bannerLink.addEventListener('click', (e) => {
@@ -361,7 +391,6 @@ function renderTable() {
   const slugs = slugMap(); // key id -> page slug (deduped)
 
   const head = `<thead><tr>
-      <th>Key / URL</th>
       <th>Label</th>
       <th>Status</th>
       <th>Master</th>
@@ -386,10 +415,6 @@ function renderTable() {
       const pagePath = '/panel/' + (slugs.byId.get(k.id) || k.id);
 
       return `<tr>
-        <td class="key-cell">
-          <span class="key-id">${esc(k.id)}</span>
-          <span class="key-url" title="${esc(keyUrl(k))}">${esc(keyUrl(k))}</span>
-        </td>
         <td>
           <div class="label-cell">${esc(k.label)}</div>
           ${k.note ? `<div class="note-cell">${esc(k.note)}</div>` : ''}
@@ -412,7 +437,7 @@ function renderTable() {
     })
     .join('');
 
-  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="8"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
+  wrap.innerHTML = `<table class="keys">${head}<tbody>${bodyRows || `<tr><td colspan="7"><div class="empty">No keys yet — create one above and hand the link to someone.</div></td></tr>`}</tbody></table>`;
 
   wrap.querySelectorAll('a[data-act]').forEach((a) => {
     a.addEventListener('click', (e) => {
@@ -538,6 +563,7 @@ function renderSettings() {
         <div class="grow"></div>
         <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
         <span class="user-chip">${esc(state.username)}</span>
+        <button class="btn btn-sm btn-ghost" id="sessions-btn">Sessions</button>
         <button class="btn btn-sm btn-ghost" id="back-btn">← Dashboard</button>
         <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
       </header>
@@ -576,6 +602,7 @@ function renderSettings() {
     await refresh();
     renderDash();
   });
+  $('#sessions-btn').addEventListener('click', loadSessions);
   $('#logout-btn').addEventListener('click', async () => {
     await fetch('api/logout', { method: 'POST' }).catch(() => {});
     renderLogin();
@@ -629,6 +656,363 @@ function renderSettings() {
   });
 }
 
+/* ---------- sessions & security view ---------- */
+
+async function loadSessions() {
+  try {
+    const [sRes, meRes] = await Promise.all([
+      api('api/sessions'),
+      api('api/me'),
+    ]);
+    state.sessions = sRes.sessions || [];
+    state.sessionTtlDays = sRes.sessionTtlDays || 7;
+    state.currentSessionId = meRes.sessionId || state.currentSessionId;
+    state.twoFactorEnabled = !!meRes.twoFactorEnabled;
+    renderSessions();
+  } catch (err) {
+    if (err.status === 401) renderLogin();
+    else toast(err.message, 'error');
+  }
+}
+
+async function refreshSessions() {
+  if (state.view !== 'sessions') return;
+  try {
+    const sRes = await api('api/sessions');
+    state.sessions = sRes.sessions || [];
+    state.sessionTtlDays = sRes.sessionTtlDays || state.sessionTtlDays;
+    renderSessionsTable();
+  } catch (err) {
+    if (err.status === 401) renderLogin();
+  }
+}
+
+function renderSessions() {
+  state.view = 'sessions';
+  const twoFa = state.twoFactorEnabled;
+  $('#app').innerHTML = `
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">◫</div>
+          <div class="brand-name">AIO Gate</div>
+        </div>
+        <div class="grow"></div>
+        <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
+        <span class="user-chip">${esc(state.username)}</span>
+        <button class="btn btn-sm btn-ghost" id="back-btn">← Dashboard</button>
+        <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
+      </header>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Two-factor authentication</h2>
+          <div class="grow"></div>
+          ${twoFa
+            ? '<span class="pill active">enabled</span>'
+            : '<span class="pill" style="color:var(--faint);border-color:var(--border);background:var(--surface-2)">disabled</span>'}
+        </div>
+        <div class="panel-body">
+          ${twoFa
+            ? `<p class="sec-desc">Sign-in requires a 6-digit code from your authenticator app (or a recovery code).
+              Your session is protected even if the password leaks.</p>
+              <div class="btn-row" style="margin-top:0">
+                <button class="btn btn-danger" id="tfa-disable">Disable 2FA</button>
+              </div>`
+            : `<p class="sec-desc">Add a one-time code from an authenticator app (Google Authenticator, Authy,
+              1Password, …) to admin sign-in. You'll get 10 one-time recovery codes when you enable it —
+              keep them somewhere safe in case you lose your phone.</p>
+              <div class="btn-row" style="margin-top:0">
+                <button class="btn btn-primary" id="tfa-enable">Enable two-factor authentication</button>
+              </div>`}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Admin sessions</h2>
+          <div class="grow"></div>
+          <span class="faint">expire after ${state.sessionTtlDays} days</span>
+        </div>
+        <div class="table-wrap" id="sessions-table"></div>
+        <div class="panel-body" style="padding-top:0">
+          <div class="btn-row" style="margin-top:8px">
+            <button class="btn" id="revoke-others">Sign out everywhere else</button>
+          </div>
+          <p class="hint">Every admin sign-in creates a session here. Rename them to recognize devices and
+            revoke anything you don't recognize — revocation takes effect immediately server-side.</p>
+        </div>
+      </section>
+    </div>`;
+
+  $('#back-btn').addEventListener('click', async () => {
+    state.view = 'dash';
+    history.pushState(null, '', '/panel/');
+    await refresh();
+    renderDash();
+  });
+  $('#logout-btn').addEventListener('click', async () => {
+    await fetch('api/logout', { method: 'POST' }).catch(() => {});
+    renderLogin();
+  });
+  $('#tfa-enable')?.addEventListener('click', setupTwoFactor);
+  $('#tfa-disable')?.addEventListener('click', disableTwoFactor);
+  $('#revoke-others').addEventListener('click', revokeOthers);
+
+  renderSessionsTable();
+}
+
+function renderSessionsTable() {
+  const wrap = $('#sessions-table');
+  if (!wrap) return;
+  const rows = state.sessions
+    .map((s) => {
+      const isCurrent = s.current;
+      const name = isCurrent
+        ? `${esc(s.name)} <span class="pill active" style="margin-left:6px">this session</span>`
+        : esc(s.name);
+      return `<tr>
+        <td style="min-width:180px">
+          <div class="label-cell">${name}</div>
+          ${s.userAgent ? `<div class="note-cell">${esc(s.userAgent)}</div>` : ''}
+        </td>
+        <td class="faint" style="white-space:nowrap">${esc(s.lastIp || '—')}</td>
+        <td class="faint">${relTime(s.createdAt)}</td>
+        <td class="faint">${relTime(s.lastSeenAt)}</td>
+        <td style="text-align:right">
+          <div class="row-actions">
+            <button class="btn btn-sm" data-rename="${esc(s.id)}">Rename</button>
+            <button class="btn btn-sm btn-danger" data-revoke="${esc(s.id)}" ${isCurrent ? 'data-current="1"' : ''}>Revoke</button>
+          </div>
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  wrap.innerHTML = `<table class="keys">
+    <thead><tr>
+      <th>Session</th><th>IP</th><th>Created</th><th>Last seen</th><th style="text-align:right">Actions</th>
+    </tr></thead>
+    <tbody>${rows || `<tr><td colspan="5"><div class="empty">No sessions tracked yet.</div></td></tr>`}</tbody>
+  </table>`;
+
+  wrap.querySelectorAll('button[data-rename]').forEach((b) =>
+    b.addEventListener('click', () => renameSessionModal(b.dataset.rename))
+  );
+  wrap.querySelectorAll('button[data-revoke]').forEach((b) =>
+    b.addEventListener('click', () => revokeSession(b.dataset.revoke, !!b.dataset.current))
+  );
+}
+
+function renameSessionModal(id) {
+  const s = state.sessions.find((x) => x.id === id);
+  if (!s) return;
+  const overlay = openModal(`
+    <div class="modal">
+      <h3>Rename session</h3>
+      <p class="sub">Give this session a name you'll recognize (max 32 characters).</p>
+      <div class="field">
+        <label for="s-name">Session name</label>
+        <input id="s-name" type="text" value="${esc(s.name)}" maxlength="32" spellcheck="false">
+        <p class="hint" id="s-count">0 / 32</p>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="s-cancel">Cancel</button>
+        <button class="btn btn-primary" id="s-save">Save</button>
+      </div>
+    </div>`);
+  const input = $('#s-name', overlay);
+  const count = $('#s-count', overlay);
+  const upd = () => (count.textContent = `${input.value.length} / 32`);
+  input.addEventListener('input', upd);
+  upd();
+  $('#s-cancel', overlay).addEventListener('click', closeModal);
+  $('#s-save', overlay).addEventListener('click', async () => {
+    const name = input.value.trim();
+    if (!name) return toast('Name is required', 'warn');
+    if (name.length > 32) return toast('Max 32 characters', 'warn');
+    try {
+      await api(`api/sessions/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      });
+      closeModal();
+      toast('Session renamed');
+      await refreshSessions();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+}
+
+async function revokeSession(id, isCurrent) {
+  const s = state.sessions.find((x) => x.id === id);
+  const label = s ? s.name : 'this session';
+  const ok = await confirmModal({
+    title: isCurrent ? 'Sign out this session?' : 'Revoke this session?',
+    body: isCurrent
+      ? `“${esc(label)}” is the session you're using right now — revoking it signs you out.`
+      : `“${esc(label)}” will be signed out immediately and its cookie will stop working.`,
+    confirmText: isCurrent ? 'Sign out' : 'Revoke session',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const r = await api(`api/sessions/${id}`, { method: 'DELETE' });
+    toast(r.revokedCurrent ? 'Signed out' : 'Session revoked');
+    if (r.revokedCurrent) {
+      state.currentSessionId = null;
+      state.username = null;
+      renderLogin();
+    } else {
+      await refreshSessions();
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function revokeOthers() {
+  const others = state.sessions.filter((s) => !s.current).length;
+  if (!others) {
+    toast('No other sessions to revoke', 'warn');
+    return;
+  }
+  const ok = await confirmModal({
+    title: 'Sign out everywhere else?',
+    body: `Revoke ${others} other session${others === 1 ? '' : 's'}? This session stays signed in.`,
+    confirmText: 'Sign out others',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const r = await api('api/sessions/revoke-others', { method: 'POST' });
+    toast(`Revoked ${r.revoked} session${r.revoked === 1 ? '' : 's'}`);
+    await refreshSessions();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+/* ---------- 2FA setup / disable ---------- */
+
+async function setupTwoFactor() {
+  let setup;
+  try {
+    setup = await api('api/2fa/setup', { method: 'POST' });
+  } catch (err) {
+    return toast(err.message, 'error');
+  }
+  const overlay = openModal(`
+    <div class="modal modal-wide">
+      <h3>Set up two-factor authentication</h3>
+      <p class="sub">Scan this with your authenticator app, or enter the secret manually.</p>
+      <div class="tfa-secret" title="click to select">${esc(setup.secret)}</div>
+      <p class="hint" style="margin-top:8px">
+        Or paste this into your app:<br>
+        <code class="otpauth-line">${esc(setup.otpauth)}</code>
+      </p>
+      <div class="field" style="margin-top:16px">
+        <label for="tfa-code">Enter the 6-digit code from your app</label>
+        <input id="tfa-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" spellcheck="false">
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="tfa-cancel">Cancel</button>
+        <button class="btn btn-primary" id="tfa-verify">Verify &amp; enable</button>
+      </div>
+      <p class="form-error" id="tfa-status"></p>
+    </div>`);
+  $('#tfa-cancel', overlay).addEventListener('click', closeModal);
+  const verify = async () => {
+    const code = $('#tfa-code', overlay).value.trim();
+    const statusEl = $('#tfa-status', overlay);
+    if (!/^\d{6}$/.test(code)) {
+      statusEl.textContent = 'Enter the 6-digit code';
+      return;
+    }
+    const btn = $('#tfa-verify', overlay);
+    btn.disabled = true;
+    try {
+      const r = await api('api/2fa/enable', {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      });
+      closeModal();
+      showRecoveryCodes(r.recoveryCodes || []);
+      state.twoFactorEnabled = true;
+    } catch (err) {
+      statusEl.textContent = err.message || 'Enable failed';
+      btn.disabled = false;
+    }
+  };
+  $('#tfa-verify', overlay).addEventListener('click', verify);
+  $('#tfa-code', overlay).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') verify();
+  });
+  setTimeout(() => $('#tfa-code', overlay).focus(), 30);
+}
+
+function showRecoveryCodes(codes) {
+  const overlay = openModal(`
+    <div class="modal modal-wide">
+      <h3>Save your recovery codes</h3>
+      <p class="sub">Each code works exactly once to sign in if you lose your phone. These are shown
+        only now — store them somewhere safe, then confirm.</p>
+      <div class="code-grid">${codes.map((c) => `<code>${esc(c)}</code>`).join('')}</div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="rc-done">I've saved them</button>
+      </div>
+    </div>`);
+  $('#rc-done', overlay).addEventListener('click', () => {
+    closeModal();
+    toast('Two-factor authentication enabled');
+    renderSessions();
+  });
+}
+
+function disableTwoFactor() {
+  const overlay = openModal(`
+    <div class="modal">
+      <h3>Disable two-factor authentication</h3>
+      <p class="sub">Confirm your password and a current code to turn 2FA off.</p>
+      <div class="field">
+        <label for="td-pass">Password</label>
+        <input id="td-pass" type="password" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="td-code">2FA code</label>
+        <input id="td-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="6-digit or recovery code" spellcheck="false">
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="td-cancel">Cancel</button>
+        <button class="btn btn-danger" id="td-go">Disable 2FA</button>
+      </div>
+      <p class="form-error" id="td-status"></p>
+    </div>`);
+  $('#td-cancel', overlay).addEventListener('click', closeModal);
+  $('#td-go', overlay).addEventListener('click', async () => {
+    const statusEl = $('#td-status', overlay);
+    const btn = $('#td-go', overlay);
+    btn.disabled = true;
+    try {
+      await api('api/2fa/disable', {
+        method: 'POST',
+        body: JSON.stringify({
+          password: $('#td-pass', overlay).value,
+          code: $('#td-code', overlay).value.trim(),
+        }),
+      });
+      closeModal();
+      state.twoFactorEnabled = false;
+      toast('Two-factor authentication disabled');
+      renderSessions();
+    } catch (err) {
+      statusEl.textContent = err.message || 'Failed';
+      btn.disabled = false;
+    }
+  });
+}
+
 /* ---------- key page ---------- */
 
 function wireTopbar() {
@@ -660,6 +1044,7 @@ function keyPageShell() {
         <div class="grow"></div>
         <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
         <span class="user-chip">${esc(state.username)}</span>
+        <button class="btn btn-sm btn-ghost" id="sessions-btn">Sessions</button>
         <button class="btn btn-sm btn-ghost" id="back-btn">← Dashboard</button>
         <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
       </header>
@@ -731,6 +1116,7 @@ function renderKeyPage() {
         <div class="grow"></div>
         <span class="base-chip" title="${esc(baseUrl())}">${esc(baseUrl())}</span>
         <span class="user-chip">${esc(state.username)}</span>
+        <button class="btn btn-sm btn-ghost" id="sessions-btn">Sessions</button>
         <button class="btn btn-sm btn-ghost" id="back-btn">← Dashboard</button>
         <button class="btn btn-sm btn-ghost" id="logout-btn">Sign out</button>
       </header>
@@ -791,6 +1177,8 @@ function renderKeyPage() {
     </div>`;
 
   wireTopbar();
+  const sessBtn = $('#sessions-btn');
+  if (sessBtn) sessBtn.addEventListener('click', loadSessions);
   $('#k-copy').addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(keyUrl(k));
@@ -917,6 +1305,8 @@ async function boot() {
   try {
     const me = await api('api/me');
     state.username = me.username;
+    state.currentSessionId = me.sessionId || null;
+    state.twoFactorEnabled = !!me.twoFactorEnabled;
     await refresh();
     route();
   } catch {
@@ -930,6 +1320,7 @@ window.addEventListener('popstate', route);
 setInterval(() => {
   if (state.view === 'dash') refresh();
   else if (state.view === 'key') refreshKey();
+  else if (state.view === 'sessions') refreshSessions();
 }, 30_000);
 
 boot();

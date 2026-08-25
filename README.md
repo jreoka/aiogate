@@ -223,6 +223,24 @@ Logs are pruned automatically — entries older than `HISTORY_RETENTION_DAYS`
 (a per-key safety cap of `HISTORY_MAX_PER_KEY`, default 2000, applies too).
 Deleting a key deletes its history with it.
 
+## Sessions & two-factor authentication
+
+The **Sessions** button in the panel topbar opens the admin account page:
+
+- **Two-factor authentication** — TOTP-based (Google Authenticator, Authy,
+  1Password, …), set up entirely from the panel: enable → scan/enter the
+  secret → verify a live code → save the 10 single-use recovery codes (shown
+  once). Sign-in then requires a 6-digit code; a wrong or missing code is
+  rejected and counts toward the login lockout. Disabling requires the
+  password *and* a current code. Zero dependencies — TOTP is implemented
+  with Node's own `crypto` (RFC 6238, SHA-1, 30s period).
+- **Admin sessions** — every sign-in is tracked (name, IP, user agent, first
+  seen / last active) and can be renamed (max 32 chars) or **revoked** from
+  the list; revocation kills the cookie server-side immediately, including
+  after a restart. "Sign out everywhere else" revokes all sessions except
+  the one you're using, and Sign out always revokes its own session.
+  Sessions expire after 7 days (`SESSION_TTL_MS`).
+
 ## Local tests
 
 ```bash
@@ -231,8 +249,10 @@ sh test/run.sh
 
 Starts a fake AIOStreams master (with a mock panel surface) and the gate in
 its single bundled layout: the core suite (key proxy, admin API, settings,
-watch history, per-key page URLs) plus the AIOStreams-surface suite (admin
-gating, cookie round-trips, root landing on `/panel/`).
+watch history, per-key page URLs), the AIOStreams-surface suite (admin
+gating, cookie round-trips, root landing on `/panel/`), and an admin
+sessions + 2FA suite (tracking, rename/revoke, TOTP enable/disable,
+recovery codes, logout revocation).
 
 ## Deployment notes
 

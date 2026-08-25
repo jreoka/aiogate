@@ -264,13 +264,15 @@ function loadState() {
     if (parsed && typeof parsed === 'object' && parsed.keys) {
       if (!parsed.settings) parsed.settings = {};
       if (!Array.isArray(parsed.history)) parsed.history = [];
+      if (!parsed.sessions || typeof parsed.sessions !== 'object')
+        parsed.sessions = {};
       state = parsed;
       return;
     }
   } catch {
     /* first boot or corrupt file -> start fresh */
   }
-  state = { version: 1, keys: {}, settings: {} };
+  state = { version: 1, keys: {}, settings: {}, sessions: {} };
   saveStateSync();
 }
 
@@ -336,20 +338,71 @@ function flushSave() {
 }
 
 /* ============================================================
- * Sessions (HMAC-signed cookie)
+ * Sessions (HMAC-signed cookie + tracked, revocable records)
+ *
+ * Each login creates a record in state.sessions (persisted) so the admin
+ * can name, inspect and revoke sessions from the panel. The cookie payload
+ * carries the session id; records are the source of truth for revocation.
  * ============================================================ */
 
-function createSession(username) {
+const sessionTouchCache = new Map(); // sessionId -> last touch timestamp
+const SESSION_MAX = 100; // keep newest N sessions, drop the rest
+
+/** Best-effort "Browser · OS" label from a user-agent string. */
+function defaultSessionName(ua) {
+  const lower = String(ua || '').toLowerCase();
+  if (!lower) return 'Unknown device';
+  let os = 'Unknown OS';
+  // Mobile first: "iPhone OS 17 … like Mac OS X" must not match macOS.
+  if (lower.includes('iphone')) os = 'iPhone';
+  else if (lower.includes('ipad')) os = 'iPad';
+  else if (lower.includes('android')) os = 'Android';
+  else if (lower.includes('windows')) os = 'Windows';
+  else if (lower.includes('mac os') || lower.includes('macintosh')) os = 'macOS';
+  else if (lower.includes('linux')) os = 'Linux';
+  let browser = 'Browser';
+  if (lower.includes('edg/')) browser = 'Edge';
+  else if (lower.includes('opr/') || lower.includes('opera')) browser = 'Opera';
+  else if (lower.includes('chrome')) browser = 'Chrome';
+  else if (lower.includes('firefox')) browser = 'Firefox';
+  else if (lower.includes('safari')) browser = 'Safari';
+  const mobile = lower.includes('mobile') ? ' · mobile' : '';
+  return `${browser} · ${os}${mobile}`.slice(0, 32);
+}
+
+function createSession(username, req) {
+  const id = crypto.randomBytes(16).toString('hex');
+  const ua = String(req.headers['user-agent'] || '').slice(0, 300);
+  state.sessions[id] = {
+    id,
+    name: defaultSessionName(ua),
+    createdAt: nowIso(),
+    lastSeenAt: nowIso(),
+    lastIp: clientIp(req),
+    userAgent: ua,
+  };
+  pruneSessions();
   const payload = Buffer.from(
-    JSON.stringify({ u: username, e: Date.now() + SESSION_TTL_MS })
+    JSON.stringify({
+      u: username,
+      e: Date.now() + SESSION_TTL_MS,
+      s: id,
+    })
   ).toString('base64url');
   const sig = crypto
     .createHmac('sha256', SESSION_SECRET)
     .update(payload)
     .digest('base64url');
+  saveStateSync(); // sessions persist so revocation survives restarts
   return payload + '.' + sig;
 }
 
+/**
+ * Resolve the admin session from a cookie header, or null. Returns
+ * `{ username, sessionId }`. Legacy cookies without a session id (created
+ * before session tracking existed) still validate and work, but can't be
+ * revoked individually.
+ */
 function readSession(cookieHeader) {
   if (!cookieHeader) return null;
   const m = cookieHeader.match(/(?:^|;\s*)aio_session=([^;]+)/);
@@ -364,10 +417,189 @@ function readSession(cookieHeader) {
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (typeof data.e !== 'number' || data.e < Date.now()) return null;
-    return data.u;
+    if (typeof data.s === 'string') {
+      const rec = state.sessions[data.s];
+      if (!rec || rec.revoked) return null;
+      return { username: data.u, sessionId: data.s };
+    }
+    return { username: data.u, sessionId: null }; // legacy cookie
   } catch {
     return null;
   }
+}
+
+/** Throttled "last seen" heartbeat so the panel shows live-ish activity. */
+function touchSession(sessionId) {
+  const rec = state.sessions && state.sessions[sessionId];
+  if (!rec) return;
+  const now = Date.now();
+  if (now - (sessionTouchCache.get(sessionId) || 0) < 60_000) return;
+  sessionTouchCache.set(sessionId, now);
+  rec.lastSeenAt = nowIso();
+  scheduleSave();
+}
+
+function revokeSession(sessionId) {
+  if (!state.sessions[sessionId]) return false;
+  delete state.sessions[sessionId];
+  saveStateSync();
+  return true;
+}
+
+/** Drop expired sessions and cap the tracked set to the newest N. */
+function pruneSessions() {
+  const sessions = state.sessions || {};
+  const cutoff = Date.now() - SESSION_TTL_MS;
+  let changed = false;
+  for (const [id, rec] of Object.entries(sessions)) {
+    if (!rec || Date.parse(rec.createdAt || 0) < cutoff) {
+      delete sessions[id];
+      changed = true;
+    }
+  }
+  const ids = Object.keys(sessions).sort(
+    (a, b) =>
+      (sessions[b].lastSeenAt || '').localeCompare(sessions[a].lastSeenAt || '')
+  );
+  for (const id of ids.slice(SESSION_MAX)) {
+    delete sessions[id];
+    changed = true;
+  }
+  if (changed) scheduleSave();
+}
+
+function listSessions() {
+  return Object.values(state.sessions || {}).sort((a, b) =>
+    (b.lastSeenAt || '').localeCompare(a.lastSeenAt || '')
+  );
+}
+
+/* ============================================================
+ * Two-factor authentication (TOTP, zero-dependency)
+ * ============================================================ */
+
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const RECOVERY_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/1/I/L/O
+const TOTP_PERIOD_MS = 30_000;
+const TOTP_DIGITS = 6;
+const TOTP_WINDOW = 1; // ±1 step either side
+
+function base32Encode(buf) {
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const b of buf) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function base32Decode(s) {
+  const clean = String(s).toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const c of clean) {
+    const idx = B32_ALPHABET.indexOf(c);
+    if (idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+
+function randomBase32(len) {
+  const buf = crypto.randomBytes(Math.ceil((len * 5) / 8));
+  return base32Encode(buf).slice(0, len);
+}
+
+/** RFC 6238 TOTP code for a base32 secret at a given time (ms). */
+function totpCode(secret, timeMs = Date.now()) {
+  const counter = BigInt(Math.floor(timeMs / TOTP_PERIOD_MS));
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(counter);
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(msg).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const bin =
+    ((hmac[offset] & 0x7f) << 24) |
+    (hmac[offset + 1] << 16) |
+    (hmac[offset + 2] << 8) |
+    hmac[offset + 3];
+  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, '0');
+}
+
+function verifyTotp(secret, code) {
+  const c = String(code || '').trim();
+  if (!/^\d{6}$/.test(c)) return false;
+  const now = Date.now();
+  for (let i = -TOTP_WINDOW; i <= TOTP_WINDOW; i++) {
+    if (safeEqual(totpCode(secret, now + i * TOTP_PERIOD_MS), c)) return true;
+  }
+  return false;
+}
+
+function otpauthUri(secret) {
+  const label = encodeURIComponent('AIO Gate:' + ADMIN_USERNAME);
+  const issuer = encodeURIComponent('AIO Gate');
+  return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&period=30&digits=6&algorithm=SHA1`;
+}
+
+function twoFactor() {
+  return (state.settings && state.settings.twoFactor) || null;
+}
+
+function twoFactorEnabled() {
+  const tf = twoFactor();
+  return !!(tf && tf.enabled && tf.secret);
+}
+
+/** Generate n recovery codes ("ABCD-EFGH" style); returns { plain, hashes }. */
+function generateRecoveryCodes(n = 10) {
+  const plain = [];
+  const hashes = [];
+  for (let i = 0; i < n; i++) {
+    let chunk = '';
+    for (let j = 0; j < 8; j++) {
+      chunk += RECOVERY_ALPHABET[crypto.randomInt(0, RECOVERY_ALPHABET.length)];
+    }
+    const code = chunk.slice(0, 4) + '-' + chunk.slice(4);
+    plain.push(code);
+    hashes.push(sha256(code.toUpperCase().replace(/[^A-Z0-9]/g, '')));
+  }
+  return { plain, hashes };
+}
+
+/** Consume a recovery code if it matches an unused one. */
+function useRecoveryCode(tf, code) {
+  const norm = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (norm.length < 8) return false;
+  const hashes = tf.recovery || [];
+  for (let i = 0; i < hashes.length; i++) {
+    if (hashes[i] === sha256(norm)) {
+      hashes.splice(i, 1);
+      saveStateSync(); // a one-time credential must persist immediately
+      return true;
+    }
+  }
+  return false;
+}
+
+/** True when a login 2FA challenge was satisfied (TOTP or recovery code). */
+function passTwoFactor(code) {
+  const tf = twoFactor();
+  if (!tf || !tf.enabled || !tf.secret) return true; // 2FA not enabled
+  if (verifyTotp(tf.secret, code)) return true;
+  return useRecoveryCode(tf, code);
 }
 
 /* ============================================================
@@ -1451,8 +1683,10 @@ function handleProxy(req, res, pathname) {
 const loginFailures = new Map(); // ip -> { fails, lockedUntil }
 
 function adminAuth(req) {
-  const username = readSession(req.headers['cookie']);
-  return username === ADMIN_USERNAME ? username : null;
+  const sess = readSession(req.headers['cookie']);
+  if (!sess || sess.username !== ADMIN_USERNAME) return null;
+  if (sess.sessionId) touchSession(sess.sessionId);
+  return sess;
 }
 
 function requireAdmin(req, res) {
@@ -1496,6 +1730,9 @@ function handleAdmin(req, res, pathname) {
     return handleLogin(req, res);
   }
   if (parts.length === 3 && parts[2] === 'logout') {
+    // Revoke the session record so a stolen cookie dies server-side too.
+    const sess = readSession(req.headers['cookie']);
+    if (sess && sess.sessionId) revokeSession(sess.sessionId);
     res.writeHead(204, {
       'set-cookie':
         'aio_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
@@ -1504,11 +1741,23 @@ function handleAdmin(req, res, pathname) {
     return;
   }
 
-  if (!requireAdmin(req, res)) return;
+  // GET /panel/api/auth-status — public, so the login form can show the
+  // 2FA code field without leaking anything but a boolean.
+  if (parts.length === 3 && parts[2] === 'auth-status') {
+    sendJson(res, 200, { twoFactorEnabled: twoFactorEnabled() });
+    return;
+  }
+
+  const auth = requireAdmin(req, res);
+  if (!auth) return;
 
   // GET /panel/api/me
   if (parts.length === 3 && parts[2] === 'me') {
-    sendJson(res, 200, { username: ADMIN_USERNAME });
+    sendJson(res, 200, {
+      username: ADMIN_USERNAME,
+      sessionId: auth.sessionId,
+      twoFactorEnabled: twoFactorEnabled(),
+    });
     return;
   }
 
@@ -1689,6 +1938,151 @@ function handleAdmin(req, res, pathname) {
     return;
   }
 
+  // GET /panel/api/sessions — tracked admin sessions (newest activity first)
+  if (parts.length === 3 && parts[2] === 'sessions' && req.method === 'GET') {
+    sendJson(res, 200, {
+      sessions: listSessions().map((s) => ({
+        ...s,
+        current: s.id === auth.sessionId,
+      })),
+      sessionTtlDays: Math.round(SESSION_TTL_MS / 86400000),
+    });
+    return;
+  }
+
+  // PATCH /panel/api/sessions/:id — rename a session (max 32 chars)
+  if (
+    parts.length === 4 &&
+    parts[2] === 'sessions' &&
+    parts[3] !== 'revoke-others' &&
+    req.method === 'PATCH'
+  ) {
+    return readBody(req, 10_000)
+      .then((body) => {
+        const rec = state.sessions && state.sessions[parts[3]];
+        if (!rec) return sendJson(res, 404, { error: 'session not found' });
+        const name = String(body.name || '').trim();
+        if (!name) return sendJson(res, 400, { error: 'name is required' });
+        if (name.length > 32) {
+          return sendJson(res, 400, { error: 'name must be 32 characters or fewer' });
+        }
+        rec.name = name;
+        saveStateSync();
+        sendJson(res, 200, { ok: true, session: rec });
+      })
+      .catch((e) => sendJson(res, 400, { error: e.message }));
+  }
+
+  // DELETE /panel/api/sessions/:id — revoke a session
+  if (
+    parts.length === 4 &&
+    parts[2] === 'sessions' &&
+    parts[3] !== 'revoke-others' &&
+    req.method === 'DELETE'
+  ) {
+    if (!revokeSession(parts[3])) {
+      return sendJson(res, 404, { error: 'session not found' });
+    }
+    sendJson(res, 200, {
+      ok: true,
+      revokedCurrent: parts[3] === auth.sessionId,
+    });
+    return;
+  }
+
+  // POST /panel/api/sessions/revoke-others — keep only this session
+  if (
+    parts.length === 4 &&
+    parts[2] === 'sessions' &&
+    parts[3] === 'revoke-others' &&
+    req.method === 'POST'
+  ) {
+    let n = 0;
+    for (const id of Object.keys(state.sessions || {})) {
+      if (id !== auth.sessionId && state.sessions[id]) {
+        delete state.sessions[id];
+        n++;
+      }
+    }
+    if (n) saveStateSync();
+    sendJson(res, 200, { ok: true, revoked: n });
+    return;
+  }
+
+  // POST /panel/api/2fa/setup — generate a pending TOTP secret
+  if (
+    parts.length === 4 &&
+    parts[2] === '2fa' &&
+    parts[3] === 'setup' &&
+    req.method === 'POST'
+  ) {
+    const secret = randomBase32(32);
+    const s = (state.settings = state.settings || {});
+    s.twoFactor = s.twoFactor || {};
+    s.twoFactor.pendingSecret = secret;
+    saveStateSync();
+    sendJson(res, 200, { secret, otpauth: otpauthUri(secret) });
+    return;
+  }
+
+  // POST /panel/api/2fa/enable — verify the pending secret with a live code
+  if (
+    parts.length === 4 &&
+    parts[2] === '2fa' &&
+    parts[3] === 'enable' &&
+    req.method === 'POST'
+  ) {
+    return readBody(req, 10_000)
+      .then((body) => {
+        const s = (state.settings = state.settings || {});
+        s.twoFactor = s.twoFactor || {};
+        const tf = s.twoFactor;
+        if (!tf.pendingSecret) {
+          return sendJson(res, 400, { error: 'start a 2FA setup first' });
+        }
+        if (!verifyTotp(tf.pendingSecret, body.code)) {
+          return sendJson(res, 400, { error: 'invalid code — check the time on your device and try again' });
+        }
+        const { plain, hashes } = generateRecoveryCodes(10);
+        tf.enabled = true;
+        tf.secret = tf.pendingSecret;
+        tf.pendingSecret = null;
+        tf.enabledAt = nowIso();
+        tf.recovery = hashes;
+        saveStateSync();
+        sendJson(res, 200, { ok: true, recoveryCodes: plain });
+      })
+      .catch((e) => sendJson(res, 400, { error: e.message }));
+  }
+
+  // POST /panel/api/2fa/disable — requires password + current code
+  if (
+    parts.length === 4 &&
+    parts[2] === '2fa' &&
+    parts[3] === 'disable' &&
+    req.method === 'POST'
+  ) {
+    return readBody(req, 10_000)
+      .then((body) => {
+        const s = (state.settings = state.settings || {});
+        s.twoFactor = s.twoFactor || {};
+        const tf = s.twoFactor;
+        if (!tf.enabled) return sendJson(res, 400, { error: '2FA is not enabled' });
+        if (String(body.password || '') !== ADMIN_PASSWORD) {
+          return sendJson(res, 401, { error: 'wrong password' });
+        }
+        if (!verifyTotp(tf.secret, body.code) && !useRecoveryCode(tf, body.code)) {
+          return sendJson(res, 400, { error: 'invalid 2FA code' });
+        }
+        tf.enabled = false;
+        tf.secret = null;
+        tf.recovery = null;
+        saveStateSync();
+        sendJson(res, 200, { ok: true });
+      })
+      .catch((e) => sendJson(res, 400, { error: e.message }));
+  }
+
   sendJson(res, 404, { error: 'not found' });
 }
 
@@ -1702,10 +2096,7 @@ function handleLogin(req, res) {
   }
   readBody(req, 10_000)
     .then((body) => {
-      const ok =
-        String(body.username || '') === ADMIN_USERNAME &&
-        String(body.password || '') === ADMIN_PASSWORD;
-      if (!ok) {
+      const fail = (status, msg, extra) => {
         const cur = loginFailures.get(ip) || { fails: 0, lockedUntil: 0 };
         cur.fails += 1;
         if (cur.fails >= LOGIN_MAX_FAILS) {
@@ -1713,13 +2104,29 @@ function handleLogin(req, res) {
           cur.fails = 0;
         }
         loginFailures.set(ip, cur);
-        return sendJson(res, 401, { error: 'invalid credentials' });
+        sendJson(res, status, { error: msg, ...(extra || {}) });
+      };
+      const ok =
+        String(body.username || '') === ADMIN_USERNAME &&
+        String(body.password || '') === ADMIN_PASSWORD;
+      if (!ok) {
+        return fail(401, 'invalid credentials');
+      }
+      // Password is right — if 2FA is enabled, the TOTP/recovery code must
+      // be too. Missing/wrong codes get the same lockout treatment.
+      if (!passTwoFactor(body.code)) {
+        const provided = String(body.code || '').trim();
+        return fail(
+          401,
+          provided ? 'invalid two-factor code' : 'two-factor code required',
+          { twoFactorRequired: true }
+        );
       }
       loginFailures.delete(ip);
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
-        'set-cookie': `aio_session=${createSession(ADMIN_USERNAME)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+        'set-cookie': `aio_session=${createSession(ADMIN_USERNAME, req)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
       });
       res.end(JSON.stringify({ username: ADMIN_USERNAME }));
     })
@@ -1928,7 +2335,11 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 loadState();
 pruneHistory(true); // drop watch-history entries older than the retention window
-setInterval(() => pruneHistory(), 6 * 3600 * 1000).unref();
+pruneSessions(); // drop expired sessions + cap the tracked set
+setInterval(() => {
+  pruneHistory();
+  pruneSessions();
+}, 6 * 3600 * 1000).unref();
 server.listen(PORT, HOST, () => {
   const bootMaster = effectiveMaster();
   console.log(`[boot] aio-gate listening on http://${HOST}:${PORT}`);
