@@ -87,6 +87,12 @@ const IMDB_SUGGEST_BASE = (
 const IMDB_FAIL_TTL_MS = 6 * 3600 * 1000;
 const imdbFailCache = new Map();
 const MAX_REWRITE_BYTES = 16 * 1024 * 1024;
+// How long a playback session stays "watching" after its last request. The
+// player refreshes the HLS playlist and fetches segments every few seconds
+// while it is playing, so a session idle longer than this is considered
+// stopped: the green "watching" light goes off. Configurable via
+// STREAM_IDLE_MS (1000-3600000).
+const STREAM_IDLE_MS = clampInt(ENV.STREAM_IDLE_MS, 120000, 1000, 3600000);
 const LOGIN_MAX_FAILS = 10;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -682,6 +688,12 @@ function updateKey(id, patch) {
       throw err;
     }
     key.status = patch.status;
+    // Pausing or revoking a key clears its live-stream sessions right away,
+    // so the "watching" light goes out immediately (the key is blocked
+    // anyway while paused/revoked).
+    if (key.status === 'paused' || key.status === 'revoked') {
+      activeStreams.delete(id);
+    }
   }
   if (patch.expiresAt !== undefined) {
     const v = (patch.expiresAt || '').trim();
@@ -700,6 +712,7 @@ function updateKey(id, patch) {
 function deleteKey(id) {
   if (!state.keys[id]) return false;
   delete state.keys[id];
+  activeStreams.delete(id); // live sessions die with the key
   // Watch history is owned by its key — purge it so nothing lingers.
   if (state.history) {
     state.history = state.history.filter((e) => e.keyId !== id);
@@ -737,9 +750,16 @@ function bytes30d(key) {
   return total;
 }
 
-/** Key as served to the admin API — usage augmented with the 30-day view. */
+/** Key as served to the admin API — usage augmented with the 30-day view
+ * and the live-stream state (count + "watching" flag for the green light). */
 function serializeKey(key) {
-  return { ...key, usage: { ...key.usage, bytes30d: bytes30d(key) } };
+  pruneStreams(); // expire idle sessions so live counts stay accurate
+  return {
+    ...key,
+    activeStreams: activeStreamCount(key.id),
+    watching: keyWatching(key.id),
+    usage: { ...key.usage, bytes30d: bytes30d(key) },
+  };
 }
 
 function touchKey(key, bytes, ip) {
@@ -763,6 +783,116 @@ function keyStatusError(key) {
   if (key.expiresAt && Date.parse(key.expiresAt) < now)
     return [410, 'This key has expired.'];
   return null;
+}
+
+/* ============================================================
+ * Live streams (per-key "watching now" + per-media history lights)
+ * ============================================================
+ *
+ * A "stream session" = one playing media file, identified by its playback
+ * path. Stremio asks for the stream list (`/stream/...` — browsing, never
+ * counted), then plays through the gate: `/go/<key>/raw/api/v1/debrid/
+ * playback/<torrent>/<file>/<name>.m3u8` plus every playlist and segment
+ * under the same directory. All those requests share one parent path, so a
+ * session is registered/touched per directory and expires after
+ * STREAM_IDLE_MS without traffic (paused player, stopped, or a CDN that
+ * serves segments directly).
+ *
+ * Sessions power the admin panel's green "watching" lights:
+ *   - the dashboard: pulsing dot per key + the "Streams now" widget
+ *   - each key's watch history: the row(s) for media streaming right now
+ *     light up (handy when a key runs several concurrent streams).
+ *
+ * Linking sessions to history rows: a playback URL doesn't carry the media
+ * id, so when a new session starts we attach the key's most recent matching
+ * watch-history entry (same client IP, recorded within the match window) —
+ * the item the user just asked for streams of is the one they're playing.
+ */
+
+// How far back a watch-history entry can be and still be linked to a new
+// playback session (same key + client IP). 30 minutes comfortably covers
+// browse-then-play.
+const STREAM_MATCH_WINDOW_MS = 30 * 60 * 1000;
+
+const activeStreams = new Map(); // keyId -> Map(streamId -> session)
+
+/** Stream session id for a gate suffix, or null when it isn't playback. */
+function streamSessionId(suffix) {
+  if (!suffix) return null;
+  const s = String(suffix);
+  // Origin-absolute master URLs are proxied under /go/<key>/raw/...; in
+  // AIOStreams those are the self-hosted playback surface (/api/v1/...).
+  if (!(s.startsWith('raw/api/') || s.startsWith('api/'))) return null;
+  const idx = s.lastIndexOf('/');
+  if (idx <= 0) return null;
+  return s.slice(0, idx); // parent dir = one playing file (incl. all segments)
+}
+
+/**
+ * Drop sessions idle longer than STREAM_IDLE_MS. Sessions of keys that are
+ * paused / revoked / expired are dropped too, so a disabled key frees its
+ * slots even before the idle timeout.
+ */
+function pruneStreams() {
+  const cutoff = Date.now() - STREAM_IDLE_MS;
+  for (const [keyId, sessions] of activeStreams) {
+    const key = getKey(keyId);
+    const dead = !key || !!keyStatusError(key);
+    for (const [sid, s] of sessions) {
+      if (dead || s.lastSeen < cutoff) sessions.delete(sid);
+    }
+    if (sessions.size === 0) activeStreams.delete(keyId);
+  }
+}
+
+/** Number of live playback sessions for a key right now. */
+function activeStreamCount(keyId) {
+  const sessions = activeStreams.get(keyId);
+  return sessions ? sessions.size : 0;
+}
+
+/** True when the key has at least one live playback session. */
+function keyWatching(keyId) {
+  const sessions = activeStreams.get(keyId);
+  return !!(sessions && sessions.size > 0);
+}
+
+/**
+ * Best guess at what a NEW playback session is playing: the key's newest
+ * watch-history entry from the same client IP, recorded within the last
+ * STREAM_MATCH_WINDOW_MS. Returns { type, id, ts } or null.
+ */
+function matchHistoryMedia(keyId, ip) {
+  if (!state.history) return null;
+  const cutoff = Date.now() - STREAM_MATCH_WINDOW_MS;
+  // History is appended oldest -> newest, so scanning from the end finds
+  // the most recent entry first; once an entry is older than the window,
+  // everything before it is too (all entries share one global timeline).
+  for (let i = state.history.length - 1; i >= 0; i--) {
+    const e = state.history[i];
+    const t = Date.parse(e.ts);
+    if (Number.isNaN(t) || t < cutoff) break;
+    if (e.keyId !== keyId) continue;
+    if (e.ip && e.ip !== ip) continue;
+    return { type: e.type, id: e.id, ts: e.ts };
+  }
+  return null;
+}
+
+/**
+ * How many live playback sessions are currently playing this history entry
+ * (0 when none). Powers the per-row green light in the key's history.
+ */
+function entryLiveCount(keyId, entry) {
+  const sessions = activeStreams.get(keyId);
+  if (!sessions) return 0;
+  let n = 0;
+  for (const s of sessions.values()) {
+    if (s.media && s.media.type === entry.type && s.media.id === entry.id) {
+      n++;
+    }
+  }
+  return n;
 }
 
 /* ============================================================
@@ -1677,6 +1807,34 @@ function handleProxy(req, res, pathname) {
     return;
   }
 
+  // Live-stream tracking ("watching now"): playback requests register/touch
+  // one session per playing file; sessions expire after STREAM_IDLE_MS of
+  // silence. Each new session is linked to the key's most recent matching
+  // watch-history entry (same client IP, within the match window) so the
+  // key's history page can light up which media is streaming right now.
+  const sid = streamSessionId(suffix);
+  if (sid) {
+    pruneStreams();
+    const now = Date.now();
+    const ip = clientIp(req);
+    let sessions = activeStreams.get(keyRec.id);
+    if (!sessions) {
+      sessions = new Map();
+      activeStreams.set(keyRec.id, sessions);
+    }
+    const existing = sessions.get(sid);
+    if (existing) {
+      existing.lastSeen = now;
+    } else {
+      sessions.set(sid, {
+        startedAt: now,
+        lastSeen: now,
+        ip,
+        media: matchHistoryMedia(keyRec.id, ip),
+      });
+    }
+  }
+
   forward(req, res, keyRec, suffix);
 }
 
@@ -1773,6 +1931,22 @@ function handleAdmin(req, res, pathname) {
       masterConfigured: !!master,
       bundled: true,
     });
+    return;
+  }
+
+  // GET /panel/api/status — live stream counts (total + per key), used by
+  // the dashboard's "Streams now" widget and the per-key green lights.
+  if (parts.length === 3 && parts[2] === 'status' && req.method === 'GET') {
+    pruneStreams();
+    const keys = {};
+    let active = 0;
+    for (const [kid, sessions] of activeStreams) {
+      if (sessions.size > 0) {
+        keys[kid] = sessions.size;
+        active += sessions.size;
+      }
+    }
+    sendJson(res, 200, { active, keys });
     return;
   }
 
@@ -1927,7 +2101,9 @@ function handleAdmin(req, res, pathname) {
     return;
   }
 
-  // GET /panel/api/keys/:id/history — what this key streamed (newest first)
+  // GET /panel/api/keys/:id/history — what this key streamed (newest first).
+  // Each entry carries a `live` count: how many playback sessions are
+  // currently streaming that media (0 = not playing now).
   if (
     parts.length === 5 &&
     parts[2] === 'keys' &&
@@ -1935,8 +2111,12 @@ function handleAdmin(req, res, pathname) {
     req.method === 'GET'
   ) {
     if (!getKey(parts[3])) return sendJson(res, 404, { error: 'not found' });
+    pruneStreams(); // drop idle sessions so the live flags are current
     sendJson(res, 200, {
-      entries: keyHistory(parts[3], 500),
+      entries: keyHistory(parts[3], 500).map((e) => ({
+        ...e,
+        live: entryLiveCount(parts[3], e),
+      })),
       retentionDays: Math.round(HISTORY_RETENTION_MS / 86400000),
     });
     return;
@@ -2343,6 +2523,7 @@ pruneSessions(); // drop expired sessions + cap the tracked set
 setInterval(() => {
   pruneHistory();
   pruneSessions();
+  pruneStreams(); // expire idle playback sessions + disabled keys' slots
 }, 6 * 3600 * 1000).unref();
 server.listen(PORT, HOST, () => {
   const bootMaster = effectiveMaster();

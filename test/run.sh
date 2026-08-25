@@ -17,6 +17,7 @@ PUBLIC_BASE="http://127.0.0.1:8085" \
 ADMIN_USERNAME="admin" \
 ADMIN_PASSWORD="test-pw" \
 IMDB_SUGGEST_URL="http://127.0.0.1:3900" \
+STREAM_IDLE_MS=3000 \
 PORT=8085 \
 DATA_FILE="$(pwd)/test/data-test.json" \
 node server.js &

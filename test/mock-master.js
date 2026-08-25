@@ -184,31 +184,35 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  if (p === '/api/v1/debrid/playback/abc/xyz/title.mp4') {
-    res.writeHead(302, {
-      location: `${ORIGIN}/api/v1/debrid/playback/abc/xyz/title.m3u8`,
-    });
-    return res.end();
-  }
-
-  if (p === '/api/v1/debrid/playback/abc/xyz/rel.mp4') {
-    // relative redirect, as express res.redirect('/...') would emit
-    res.writeHead(302, { location: '/api/v1/debrid/playback/abc/xyz/seg0.ts' });
-    return res.end();
-  }
-
-  if (p === '/api/v1/debrid/playback/abc/xyz/title.m3u8') {
-    res.writeHead(200, {
-      'content-type': 'application/vnd.apple.mpegurl; charset=utf-8',
-    });
-    return res.end(
-      `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\n${ORIGIN}/api/v1/debrid/playback/abc/xyz/seg0.ts\n#EXTINF:6.0,\n${ORIGIN}/api/v1/debrid/playback/abc/xyz/seg1.ts\n#EXT-X-ENDLIST\n`
-    );
-  }
-
-  if (p === '/api/v1/debrid/playback/abc/xyz/seg0.ts') {
-    res.writeHead(200, { 'content-type': 'video/mp2t' });
-    return res.end(crypto.randomBytes(128 * 1024));
+  // Self-hosted playback surface. Any /<a>/<b>/<file> tree under
+  // /api/v1/debrid/playback/ works — the gate keys its "watching" sessions
+  // and history-live matching off these paths, so tests need several
+  // distinct ones (e.g. abc/xyz vs def/uvw).
+  const pb = p.match(/^\/api\/v1\/debrid\/playback\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (pb) {
+    const base = `/api/v1/debrid/playback/${pb[1]}/${pb[2]}`;
+    const file = pb[3];
+    if (file === 'title.mp4') {
+      res.writeHead(302, { location: `${ORIGIN}${base}/title.m3u8` });
+      return res.end();
+    }
+    if (file === 'rel.mp4') {
+      // relative redirect, as express res.redirect('/...') would emit
+      res.writeHead(302, { location: `${base}/seg0.ts` });
+      return res.end();
+    }
+    if (file === 'title.m3u8') {
+      res.writeHead(200, {
+        'content-type': 'application/vnd.apple.mpegurl; charset=utf-8',
+      });
+      return res.end(
+        `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\n${ORIGIN}${base}/seg0.ts\n#EXTINF:6.0,\n${ORIGIN}${base}/seg1.ts\n#EXT-X-ENDLIST\n`
+      );
+    }
+    if (file === 'seg0.ts' || file === 'seg1.ts') {
+      res.writeHead(200, { 'content-type': 'video/mp2t' });
+      return res.end(crypto.randomBytes(128 * 1024));
+    }
   }
 
   res.writeHead(404, { 'content-type': 'application/json' });
