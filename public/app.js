@@ -364,13 +364,12 @@ function renderDash() {
         <div class="panel-body">
           <form id="create-form" class="newkey-grid">
             <div class="field">
-              <label for="new-label">Label (who is this for?)</label>
+              <label for="new-label">Label</label>
               <input id="new-label" type="text" placeholder="e.g. Mom — living room TV" spellcheck="false">
             </div>
             <div class="field">
               <label for="new-expiry">Expires (optional)</label>
               <input id="new-expiry" type="text" placeholder="e.g. 7d, 30d, 1y or never" spellcheck="false" autocomplete="off">
-              <p class="hint">Leave empty for never. Use 7d, 2w, 3mo, 1y, 12h, 30m, 60s — also accepts dates like 2026-12-31.</p>
               <p class="faint" id="new-expiry-preview" style="font-size:12px;min-height:14px"></p>
             </div>
             <button class="btn btn-primary" type="submit">Create key</button>

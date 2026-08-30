@@ -252,6 +252,16 @@ input:focus, textarea:focus { border-color: var(--accent); }
 
 .newkey-grid .field { margin: 0; }
 
+#new-expiry-preview {
+  position: absolute;
+  margin-top: 4px;
+}
+
+.newkey-grid .field:nth-child(2) {
+  position: relative;
+  padding-bottom: 18px;
+}
+
 .hint { color: var(--faint); font-size: 12px; margin-top: 10px; }
 .hint code { font-family: var(--mono); color: var(--muted); background: var(--bg); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); }
 
