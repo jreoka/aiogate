@@ -109,6 +109,63 @@ function keyStatus(key) {
   return 'active';
 }
 
+/* Duration parsing: "7d", "2y", "1w 3d 12h" etc. -> ms */
+function parseDurationMs(input) {
+  const s = String(input).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return null;
+  const re = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g;
+  let total = 0;
+  let count = 0;
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const gap = s.slice(lastIndex, m.index).trim();
+    if (gap !== '') return null;
+    const val = parseFloat(m[1]);
+    const unit = m[2].toLowerCase();
+    let msPerUnit = null;
+    if (/^y(rs?)?$|^years?$/.test(unit)) msPerUnit = 365 * 24 * 3600 * 1000;
+    else if (/^mo(n)?s?$|^months?$/.test(unit)) msPerUnit = 30 * 24 * 3600 * 1000;
+    else if (/^w(ks?)?$|^weeks?$/.test(unit)) msPerUnit = 7 * 24 * 3600 * 1000;
+    else if (/^d(ays?)?$/.test(unit)) msPerUnit = 24 * 3600 * 1000;
+    else if (/^h(rs?)?$|^hours?$/.test(unit)) msPerUnit = 3600 * 1000;
+    else if (/^m$|^mins?$|^minutes?$/.test(unit)) msPerUnit = 60 * 1000;
+    else if (/^s$|^secs?$|^seconds?$/.test(unit)) msPerUnit = 1000;
+    else return null;
+    total += val * msPerUnit;
+    count++;
+    lastIndex = re.lastIndex;
+  }
+  if (count === 0) return null;
+  if (s.slice(lastIndex).trim() !== '') return null;
+  if (total <= 0) return null;
+  return total;
+}
+
+function parseExpiryInput(raw) {
+  if (raw == null) return null;
+  const v = String(raw).trim();
+  if (!v) return null;
+  if (/^(never|none)$/i.test(v)) return null;
+  const dur = parseDurationMs(v);
+  if (dur !== null) return new Date(Date.now() + dur).toISOString();
+  const t = Date.parse(v);
+  if (!Number.isNaN(t)) return new Date(t).toISOString();
+  return undefined; // invalid
+}
+
+function expiryPreview(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return '';
+  if (/^(never|none)$/i.test(v)) return '→ never expires';
+  const parsed = parseExpiryInput(v);
+  if (parsed === undefined) return '⚠ invalid — use 7d, 30d, 1y, 2w, 12h or a date';
+  if (parsed === null) return '→ never expires';
+  const d = new Date(parsed);
+  return `→ expires ${d.toLocaleString()}`;
+}
+
 function baseUrl() {
   return (state.config.publicBase || location.origin).replace(/\/+$/, '');
 }
@@ -312,7 +369,9 @@ function renderDash() {
             </div>
             <div class="field">
               <label for="new-expiry">Expires (optional)</label>
-              <input id="new-expiry" type="datetime-local">
+              <input id="new-expiry" type="text" placeholder="e.g. 7d, 30d, 1y or never" spellcheck="false" autocomplete="off">
+              <p class="hint">Leave empty for never. Use 7d, 2w, 3mo, 1y, 12h, 30m, 60s — also accepts dates like 2026-12-31.</p>
+              <p class="faint" id="new-expiry-preview" style="font-size:12px;min-height:14px"></p>
             </div>
             <button class="btn btn-primary" type="submit">Create key</button>
           </form>
@@ -342,6 +401,13 @@ function renderDash() {
     loadSettings();
   });
 
+  const newExpiryInput = $('#new-expiry');
+  const newExpiryPreview = $('#new-expiry-preview');
+  if (newExpiryInput && newExpiryPreview) {
+    newExpiryInput.addEventListener('input', () => {
+      newExpiryPreview.textContent = expiryPreview(newExpiryInput.value);
+    });
+  }
   $('#create-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const label = $('#new-label').value.trim();
@@ -349,18 +415,20 @@ function renderDash() {
       toast('Give the key a label', 'warn');
       return;
     }
-    let expiresAt = null;
     const raw = $('#new-expiry').value;
-    if (raw) {
-      const d = new Date(raw);
-      if (!Number.isNaN(d.getTime())) expiresAt = d.toISOString();
+    const parsed = parseExpiryInput(raw);
+    if (parsed === undefined) {
+      toast('Invalid expiry — use 7d, 30d, 1y or a date', 'error');
+      return;
     }
+    const expiresAt = parsed;
     try {
       await api('api/keys', {
         method: 'POST',
         body: JSON.stringify({ label, expiresAt }),
       });
       e.target.reset();
+      if (newExpiryPreview) newExpiryPreview.textContent = '';
       toast('Key created');
       await refresh();
     } catch (err) {
@@ -431,6 +499,9 @@ function renderTable() {
 // All per-key controls live on the dedicated key page (own URL per key).
 
 function openEditModal(key) {
+  const currentExpiryText = key.expiresAt
+    ? `${new Date(key.expiresAt).toLocaleString()} (${relTime(key.expiresAt)})`
+    : 'never';
   const overlay = openModal(`
     <div class="modal">
       <h3>Edit key</h3>
@@ -445,7 +516,9 @@ function openEditModal(key) {
       </div>
       <div class="field">
         <label for="e-expiry">Expires</label>
-        <input id="e-expiry" type="datetime-local" value="${key.expiresAt ? toLocalInput(key.expiresAt) : ''}">
+        <input id="e-expiry" type="text" placeholder="e.g. 7d, 30d, 1y or 2026-12-31" value="${key.expiresAt ? esc(toLocalInput(key.expiresAt)) : ''}" spellcheck="false" autocomplete="off">
+        <p class="hint" style="margin-top:6px">Current: ${esc(currentExpiryText)} — leave as-is to keep, empty for never, or enter 7d / 2y etc. (from now)</p>
+        <p class="faint" id="e-expiry-preview" style="font-size:12px;min-height:14px">${key.expiresAt ? esc(expiryPreview(toLocalInput(key.expiresAt))) : ''}</p>
       </div>
       <div class="btn-row">
         <button class="btn" id="e-cancel">Cancel</button>
@@ -453,6 +526,13 @@ function openEditModal(key) {
       </div>
     </div>`);
 
+  const eInput = $('#e-expiry', overlay);
+  const ePreview = $('#e-expiry-preview', overlay);
+  if (eInput && ePreview) {
+    eInput.addEventListener('input', () => {
+      ePreview.textContent = expiryPreview(eInput.value);
+    });
+  }
   $('#e-cancel', overlay).addEventListener('click', closeModal);
   $('#e-save', overlay).addEventListener('click', async () => {
     const patch = {
@@ -460,9 +540,12 @@ function openEditModal(key) {
       note: $('#e-note').value.trim(),
     };
     const raw = $('#e-expiry').value;
-    const d = raw ? new Date(raw) : null;
-    patch.expiresAt =
-      d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
+    const parsed = parseExpiryInput(raw);
+    if (parsed === undefined) {
+      toast('Invalid expiry — use 7d, 30d, 1y or a date', 'error');
+      return;
+    }
+    patch.expiresAt = parsed;
     await patchKey(key.id, patch, 'Key updated');
     closeModal();
   });

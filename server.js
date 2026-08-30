@@ -181,6 +181,55 @@ function clampInt(v, def, min, max) {
   return Math.min(Math.max(n, min), max);
 }
 
+/* Duration parsing for expiresAt: "7d", "2y", "1w 3d 12h" etc. */
+function parseDurationMs(input) {
+  const s = String(input).trim();
+  if (!s) return null;
+  // ISO date-looking strings are not durations
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return null;
+  const re = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g;
+  let total = 0;
+  let count = 0;
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const gap = s.slice(lastIndex, m.index).trim();
+    if (gap !== '') return null;
+    const val = parseFloat(m[1]);
+    const unit = m[2].toLowerCase();
+    let msPerUnit = null;
+    if (/^y(rs?)?$|^years?$/.test(unit)) msPerUnit = 365 * 24 * 3600 * 1000;
+    else if (/^mo(n)?s?$|^months?$/.test(unit)) msPerUnit = 30 * 24 * 3600 * 1000;
+    else if (/^w(ks?)?$|^weeks?$/.test(unit)) msPerUnit = 7 * 24 * 3600 * 1000;
+    else if (/^d(ays?)?$/.test(unit)) msPerUnit = 24 * 3600 * 1000;
+    else if (/^h(rs?)?$|^hours?$/.test(unit)) msPerUnit = 3600 * 1000;
+    else if (/^m$|^mins?$|^minutes?$/.test(unit)) msPerUnit = 60 * 1000;
+    else if (/^s$|^secs?$|^seconds?$/.test(unit)) msPerUnit = 1000;
+    else return null;
+    total += val * msPerUnit;
+    count++;
+    lastIndex = re.lastIndex;
+  }
+  if (count === 0) return null;
+  if (s.slice(lastIndex).trim() !== '') return null;
+  if (total <= 0) return null;
+  return total;
+}
+
+function parseExpiresAt(value) {
+  if (value == null) return null;
+  const v = String(value).trim();
+  if (!v) return null;
+  if (/^(never|none)$/i.test(v)) return null;
+  const dur = parseDurationMs(v);
+  if (dur !== null) return new Date(Date.now() + dur).toISOString();
+  const t = Date.parse(v);
+  if (!Number.isNaN(t)) return new Date(t).toISOString();
+  const err = new Error('invalid expiresAt — use e.g. 7d, 30d, 1y or a date like 2026-12-31');
+  err.status = 400;
+  throw err;
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
   if (!res.headersSent) {
@@ -667,12 +716,16 @@ function createKey(fields) {
   do {
     id = randomKeyId(KEY_LENGTH);
   } while (state.keys[id]);
+  let expiresAt = null;
+  if (fields.expiresAt !== undefined && fields.expiresAt !== null && String(fields.expiresAt).trim() !== '') {
+    expiresAt = parseExpiresAt(fields.expiresAt);
+  }
   const key = {
     id,
     label: String(fields.label || 'Key ' + id.slice(0, 6)),
     note: String(fields.note || ''),
     status: 'active',
-    expiresAt: fields.expiresAt || null,
+    expiresAt,
     createdAt: nowIso(),
     updatedAt: nowIso(),
     usage: { requests: 0, lastUsedAt: null, lastIp: null },
@@ -696,13 +749,7 @@ function updateKey(id, patch) {
     key.status = patch.status;
   }
   if (patch.expiresAt !== undefined) {
-    const v = (patch.expiresAt || '').trim();
-    if (v && Number.isNaN(Date.parse(v))) {
-      const err = new Error('invalid expiresAt');
-      err.status = 400;
-      throw err;
-    }
-    key.expiresAt = v ? new Date(v).toISOString() : null;
+    key.expiresAt = parseExpiresAt(patch.expiresAt);
   }
   key.updatedAt = nowIso();
   saveStateSync();
@@ -718,6 +765,23 @@ function deleteKey(id) {
   }
   saveStateSync();
   return true;
+}
+
+function pruneExpiredKeys() {
+  const now = Date.now();
+  let changed = false;
+  for (const [id, key] of Object.entries(state.keys)) {
+    if (key.expiresAt && Date.parse(key.expiresAt) < now) {
+      delete state.keys[id];
+      if (state.history) {
+        state.history = state.history.filter((e) => e.keyId !== id);
+      }
+      changed = true;
+      console.log(`[keys] auto-deleted expired key ${id.slice(0, 6)} (${key.label})`);
+    }
+  }
+  if (changed) saveStateSync();
+  return changed;
 }
 
 function touchKey(key, ip) {
@@ -1619,6 +1683,10 @@ function handleProxy(req, res, pathname) {
 
   const blocked = keyStatusError(keyRec);
   if (blocked) {
+    // Expired keys are auto-deleted — behave like deleteKey.
+    if (keyRec.expiresAt && Date.parse(keyRec.expiresAt) < Date.now()) {
+      deleteKey(keyRec.id);
+    }
     sendJson(res, blocked[0], { error: blocked[1] });
     return;
   }
@@ -1829,6 +1897,7 @@ function handleAdmin(req, res, pathname) {
 
   // GET /panel/api/keys
   if (parts.length === 3 && parts[2] === 'keys' && req.method === 'GET') {
+    pruneExpiredKeys();
     sendJson(res, 200, { keys: listKeys() });
     return;
   }
@@ -1883,6 +1952,10 @@ function handleAdmin(req, res, pathname) {
   ) {
     const key = getKey(parts[3]);
     if (!key) return sendJson(res, 404, { error: 'not found' });
+    if (key.expiresAt && Date.parse(key.expiresAt) < Date.now()) {
+      deleteKey(key.id);
+      return sendJson(res, 404, { error: 'not found' });
+    }
     sendJson(res, 200, { key });
     return;
   }
@@ -1894,7 +1967,12 @@ function handleAdmin(req, res, pathname) {
     parts[4] === 'history' &&
     req.method === 'GET'
   ) {
-    if (!getKey(parts[3])) return sendJson(res, 404, { error: 'not found' });
+    const hk = getKey(parts[3]);
+    if (!hk) return sendJson(res, 404, { error: 'not found' });
+    if (hk.expiresAt && Date.parse(hk.expiresAt) < Date.now()) {
+      deleteKey(hk.id);
+      return sendJson(res, 404, { error: 'not found' });
+    }
     sendJson(res, 200, {
       entries: keyHistory(parts[3], 500),
       retentionDays: Math.round(HISTORY_RETENTION_MS / 86400000),
@@ -2300,10 +2378,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 loadState();
 pruneHistory(true); // drop watch-history entries older than the retention window
 pruneSessions(); // drop expired sessions + cap the tracked set
+pruneExpiredKeys(); // delete keys whose expiresAt is in the past
 setInterval(() => {
   pruneHistory();
   pruneSessions();
 }, 6 * 3600 * 1000).unref();
+setInterval(() => {
+  pruneExpiredKeys();
+}, 60 * 1000).unref();
 server.listen(PORT, HOST, () => {
   const bootMaster = effectiveMaster();
   console.log(`[boot] aio-gate listening on http://${HOST}:${PORT}`);
