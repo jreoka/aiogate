@@ -88,7 +88,14 @@ function relTime(iso) {
   if (!iso) return '—';
   const t = new Date(iso).getTime();
   const d = Date.now() - t;
-  if (d < 0) return 'in ' + Math.round(-d / 1000) + 's';
+  if (d < 0) {
+    const ad = -d;
+    if (ad < 60_000) return `in ${Math.round(ad / 1000)}s`;
+    if (ad < 3600_000) return `in ${Math.floor(ad / 60_000)}m`;
+    if (ad < 86400_000) return `in ${Math.floor(ad / 3600_000)}h`;
+    if (ad < 7 * 86400_000) return `in ${Math.floor(ad / 86400_000)}d`;
+    return new Date(iso).toLocaleString();
+  }
   if (d < 60_000) return 'just now';
   if (d < 3600_000) return Math.floor(d / 60_000) + 'm ago';
   if (d < 86400_000) return Math.floor(d / 3600_000) + 'h ago';
@@ -457,7 +464,7 @@ function renderTable() {
     .map((k) => {
       const st = keyStatus(k);
       const expireText = k.expiresAt
-        ? `${st === 'expired' ? 'expired ' : ''}${new Date(k.expiresAt).toLocaleDateString()}`
+        ? `${st === 'expired' ? 'expired ' : ''}${new Date(k.expiresAt).toLocaleString()} <span style="font-size:11px;opacity:0.8">(${relTime(k.expiresAt)})</span>`
         : '—';
       const lastIp = k.usage.lastIp ? ` · ${esc(k.usage.lastIp)}` : '';
       const pagePath = '/panel/' + (slugs.byId.get(k.id) || k.id);
@@ -1195,7 +1202,7 @@ function renderKeyPage() {
           <div class="meta-grid">
             <div class="meta"><div class="num">${fmtCount(k.usage.requests)}</div><div class="lbl">Requests</div></div>
             <div class="meta"><div class="num">${lastUsed}</div><div class="lbl">Last used</div></div>
-            <div class="meta"><div class="num">${k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : '—'}</div><div class="lbl">Expires</div></div>
+            <div class="meta"><div class="num" style="font-size:13px;line-height:1.3">${k.expiresAt ? `${esc(new Date(k.expiresAt).toLocaleString())}<br><span class="faint" style="font-size:11px">${esc(relTime(k.expiresAt))}</span>` : '—'}</div><div class="lbl">Expires</div></div>
             <div class="meta"><div class="num">${relTime(k.createdAt)}</div><div class="lbl">Created</div></div>
           </div>
         </div>
