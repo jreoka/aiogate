@@ -248,18 +248,21 @@ input:focus, textarea:focus { border-color: var(--accent); }
   grid-template-columns: 2fr 1fr auto;
   gap: 12px;
   align-items: end;
+  padding-bottom: 16px;
 }
 
 .newkey-grid .field { margin: 0; }
 
 #new-expiry-preview {
   position: absolute;
+  top: 100%;
+  left: 0;
   margin-top: 4px;
+  white-space: nowrap;
 }
 
 .newkey-grid .field:nth-child(2) {
   position: relative;
-  padding-bottom: 18px;
 }
 
 .hint { color: var(--faint); font-size: 12px; margin-top: 10px; }
