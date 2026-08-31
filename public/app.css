@@ -429,6 +429,32 @@ table.keys tbody tr:hover { background: var(--surface-2); }
 
 .hist-ep { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.pagination-info {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.pagination-ellipsis {
+  color: var(--faint);
+  padding: 0 2px;
+  font-size: 13px;
+}
+
 /* ---------- sessions & security ---------- */
 
 .sec-desc { color: var(--muted); font-size: 13px; margin: 0 0 16px; max-width: 640px; }

@@ -9,6 +9,8 @@ const state = {
   currentKeyId: null,
   currentKey: null,
   currentHistory: [],
+  currentHistoryPage: 1,
+  historyFilter: '',
   retentionDays: 30,
   sessions: [],
   sessionTtlDays: 7,
@@ -1118,6 +1120,8 @@ function keyPageShell() {
 async function renderKey(id) {
   state.view = 'key';
   state.currentKeyId = id;
+  state.currentHistoryPage = 1;
+  state.historyFilter = '';
   // Keep the address bar on this key's own URL (label may have changed or
   // duplicate labels re-deduped since the link was rendered).
   const want = keyPagePath(id);
@@ -1230,6 +1234,7 @@ function renderKeyPage() {
             <input id="hist-filter" type="text" placeholder="Filter…" spellcheck="false">
           </div>
           <div class="table-wrap" id="hist-table"></div>
+          <div class="pagination" id="hist-pagination"></div>
           <p class="hint">Stream lookups made by this key are recorded here automatically.
             Entries older than ${state.retentionDays} days are deleted to save space.</p>
         </div>
@@ -1278,10 +1283,13 @@ function renderKeyPage() {
   });
 
   const filterEl = $('#hist-filter');
-  filterEl.addEventListener('input', () =>
-    renderHistTable(hist, filterEl.value.trim().toLowerCase())
-  );
-  renderHistTable(hist, '');
+  filterEl.value = state.historyFilter || '';
+  filterEl.addEventListener('input', () => {
+    state.historyFilter = filterEl.value.trim().toLowerCase();
+    state.currentHistoryPage = 1;
+    renderHistTable(hist, state.historyFilter, 1);
+  });
+  renderHistTable(hist, state.historyFilter || '', state.currentHistoryPage || 1);
 }
 
 function histMediaLine(e) {
@@ -1296,16 +1304,31 @@ function histMediaLine(e) {
   return parts.join(' · ');
 }
 
-function renderHistTable(entries, q) {
+function renderHistTable(entries, q, page) {
   const wrap = $('#hist-table');
+  const pagWrap = $('#hist-pagination');
   if (!wrap) return;
-  const rows = entries
-    .filter((e) => {
-      if (!q) return true;
-      return [e.type, e.id, e.title, e.episodeName, e.ip].some((v) =>
-        String(v || '').toLowerCase().includes(q)
-      );
-    })
+  const PAGE_SIZE = 10;
+  const query = q ?? state.historyFilter ?? '';
+  const curPage = page ?? state.currentHistoryPage ?? 1;
+  state.historyFilter = query;
+  state.currentHistoryPage = curPage;
+
+  const filtered = entries.filter((e) => {
+    if (!query) return true;
+    return [e.type, e.id, e.title, e.episodeName, e.ip].some((v) =>
+      String(v || '').toLowerCase().includes(query)
+    );
+  });
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(1, curPage), totalPages);
+  if (clampedPage !== curPage) state.currentHistoryPage = clampedPage;
+  const start = (clampedPage - 1) * PAGE_SIZE;
+  const pageEntries = filtered.slice(start, start + PAGE_SIZE);
+
+  const rows = pageEntries
     .map((e) => {
       const title = e.title || e.id;
       const ep = histMediaLine(e);
@@ -1326,12 +1349,56 @@ function renderHistTable(entries, q) {
     })
     .join('');
 
+  const emptyMsg = query
+    ? `<tr><td colspan="4"><div class="empty">No entries match “${esc(query)}”.</div></td></tr>`
+    : `<tr><td colspan="4"><div class="empty">Nothing streamed yet for this key — entries appear here when Stremio asks it for streams.</div></td></tr>`;
+
   wrap.innerHTML = `<table class="keys">
     <thead><tr>
       <th>When</th><th>Type</th><th>Media</th><th>IP</th>
     </tr></thead>
-    <tbody>${rows || `<tr><td colspan="4"><div class="empty">Nothing streamed yet for this key — entries appear here when Stremio asks it for streams.</div></td></tr>`}</tbody>
+    <tbody>${rows || emptyMsg}</tbody>
   </table>`;
+
+  if (!pagWrap) return;
+  if (total === 0) {
+    pagWrap.innerHTML = '';
+    return;
+  }
+  const showingStart = total === 0 ? 0 : start + 1;
+  const showingEnd = Math.min(start + PAGE_SIZE, total);
+  let html = `<div class="pagination-info">${total <= PAGE_SIZE ? `${total} ${total === 1 ? 'entry' : 'entries'}` : `Showing ${showingStart}–${showingEnd} of ${total}`} · Page ${clampedPage} of ${totalPages}</div>`;
+  if (totalPages > 1) {
+    html += `<div class="pagination-controls">`;
+    html += `<button class="btn btn-sm" data-page="${clampedPage - 1}" ${clampedPage <= 1 ? 'disabled' : ''}>‹ Prev</button>`;
+    const maxButtons = 5;
+    let s = Math.max(1, clampedPage - Math.floor(maxButtons / 2));
+    let e = Math.min(totalPages, s + maxButtons - 1);
+    if (e - s + 1 < maxButtons) s = Math.max(1, e - maxButtons + 1);
+    if (s > 1) {
+      html += `<button class="btn btn-sm" data-page="1">1</button>`;
+      if (s > 2) html += `<span class="pagination-ellipsis">…</span>`;
+    }
+    for (let p = s; p <= e; p++) {
+      html += `<button class="btn btn-sm ${p === clampedPage ? 'btn-primary' : ''}" data-page="${p}">${p}</button>`;
+    }
+    if (e < totalPages) {
+      if (e < totalPages - 1) html += `<span class="pagination-ellipsis">…</span>`;
+      html += `<button class="btn btn-sm" data-page="${totalPages}">${totalPages}</button>`;
+    }
+    html += `<button class="btn btn-sm" data-page="${clampedPage + 1}" ${clampedPage >= totalPages ? 'disabled' : ''}>Next ›</button>`;
+    html += `</div>`;
+  }
+  pagWrap.innerHTML = html;
+  pagWrap.querySelectorAll('button[data-page]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = parseInt(btn.dataset.page, 10);
+      if (!Number.isNaN(p)) {
+        state.currentHistoryPage = p;
+        renderHistTable(entries, query, p);
+      }
+    });
+  });
 }
 
 /* ---------- refresh / boot ---------- */
