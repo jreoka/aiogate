@@ -89,7 +89,7 @@ const imdbFailCache = new Map();
 const MAX_REWRITE_BYTES = 16 * 1024 * 1024;
 const LOGIN_MAX_FAILS = 10;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
-const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
+const SESSION_TTL_MS = 10**12;
 
 // Bundled mode: AIOStreams runs next to the gate inside the same container.
 // When AIOSTREAMS_INTERNAL_URL is set, the gate owns the whole public root
