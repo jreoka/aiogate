@@ -55,7 +55,7 @@ a:hover { text-decoration: underline; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 36px 32px 32px;
+  padding: 36px 32px 20px;
 }
 
 .brand {
@@ -149,7 +149,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .form-error {
   color: var(--red);
   font-size: 13px;
-  margin: 12px 0 0;
+  margin: 8px 0 0;
   min-height: 18px;
 }
 
