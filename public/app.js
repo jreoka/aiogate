@@ -282,7 +282,6 @@ async function renderLogin() {
           <div class="brand-mark">◫</div>
           <div class="brand-name">AIO Gate</div>
         </div>
-        <p class="brand-sub">Master-stream proxy · key administration</p>
         <div class="field">
           <label for="username">Username</label>
           <input id="username" type="text" autocomplete="username" spellcheck="false">
@@ -297,7 +296,6 @@ async function renderLogin() {
         </div>
         <button class="btn btn-primary login-btn" type="submit">Sign in</button>
         <p class="form-error" id="login-error"></p>
-        <p class="login-foot">Only the gate administrator can access this panel.</p>
       </form>
     </div>`;
   $('#login-form').addEventListener('submit', async (e) => {
@@ -804,8 +802,6 @@ function renderSessions() {
           <div class="btn-row" style="margin-top:8px">
             <button class="btn" id="revoke-others">Sign out everywhere else</button>
           </div>
-          <p class="hint">Every admin sign-in creates a session here. Rename them to recognize devices and
-            revoke anything you don't recognize — revocation takes effect immediately server-side.</p>
         </div>
       </section>
     </div>`;
