@@ -66,7 +66,7 @@ mock.listen(0, '127.0.0.1', () => {
         ADMIN_PASSWORD: 'pw',
         PORT: String(gport),
         DATA_FILE: dataFile,
-        PUBLIC_BASE: `http://127.0.0.1:${gport}`,
+        BASE_URL: `http://127.0.0.1:${gport}`,
       },
       stdio: 'ignore',
     }

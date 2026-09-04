@@ -51,7 +51,7 @@ const SESSION_SECRET =
   ENV.SESSION_SECRET || sha256('aio-gate:' + ADMIN_PASSWORD);
 const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
-const PUBLIC_BASE = (ENV.PUBLIC_BASE || '').replace(/\/+$/, '');
+const GATE_BASE = ((ENV.BASE_URL || ENV.PUBLIC_BASE || '').trim()).replace(/\/+$/, '');
 const TRUST_PROXY = !isFalsy(ENV.TRUST_PROXY);
 const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 // Watch history retention: entries older than this are pruned automatically
@@ -112,8 +112,9 @@ if (!ADMIN_PASSWORD) {
   process.exit(1);
 }
 
-// MASTER_URL and PUBLIC_BASE are now runtime-configurable from the admin
-// panel (stored in the data file). Env vars act as defaults / fallbacks.
+// Shareable key base URL comes from the system env var BASE_URL
+// (same public URL AIOStreams itself uses). Falls back to the request
+// host when BASE_URL is unset.
 const ENV_MASTER_URL = (ENV.MASTER_URL || '').trim() || null;
 if (ENV_MASTER_URL) {
   try {
@@ -335,6 +336,7 @@ function loadState() {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     if (parsed && typeof parsed === 'object' && parsed.keys) {
       if (!parsed.settings) parsed.settings = {};
+      delete parsed.settings.publicBase; // removed: base URL now comes from BASE_URL env only
       if (!Array.isArray(parsed.history)) parsed.history = [];
       if (!parsed.sessions || typeof parsed.sessions !== 'object')
         parsed.sessions = {};
@@ -348,7 +350,10 @@ function loadState() {
         }
       }
       if (Array.isArray(parsed.history)) {
-        for (const e of parsed.history) delete e.bytes;
+        for (const e of parsed.history) {
+          delete e.bytes;
+          delete e.titleAttempted; // removed: write-only flag, never read
+        }
       }
       state = parsed;
       return;
@@ -363,7 +368,8 @@ function loadState() {
 /* ------------------------------------------------------------
  * Effective (runtime-overridable) configuration
  *
- * Settings stored in the data file take precedence over env vars.
+ * The panel-stored master URL takes precedence over the env var.
+ * (The shareable base URL is env-only: BASE_URL, else request host.)
  * ------------------------------------------------------------ */
 
 function effectiveMasterUrl() {
@@ -383,10 +389,7 @@ function effectiveMaster() {
 }
 
 function effectivePublicBase() {
-  const s = state && state.settings && state.settings.publicBase;
-  const v = s && typeof s === 'string' ? s.trim() : '';
-  const base = v || PUBLIC_BASE;
-  return base ? base.replace(/\/+$/, '') : '';
+  return GATE_BASE;
 }
 
 function effectiveOrigins(master) {
@@ -849,7 +852,6 @@ function recordStream(keyRec, ref, ip) {
     season: null,
     episodeNumber: null,
     episodeName: null,
-    titleAttempted: false,
     ip: ip || null,
   };
   state.history.push(entry);
@@ -862,7 +864,6 @@ function recordStream(keyRec, ref, ip) {
     .then((info) => {
       entry.metaAttemptedAt = Date.now();
       if (info && !entry.title) {
-        entry.titleAttempted = true;
         applyMeta(entry, info);
         scheduleSave();
       }
@@ -933,7 +934,6 @@ function keyHistory(keyId, limit) {
           resolveMeta(e.type, e.id)
             .then((info) => {
               if (info && !e.title) {
-                e.titleAttempted = true;
                 applyMeta(e, info);
                 scheduleSave();
               }
@@ -1808,9 +1808,7 @@ function handleAdmin(req, res, pathname) {
   if (parts.length === 3 && parts[2] === 'settings' && req.method === 'GET') {
     sendJson(res, 200, {
       masterUrl: effectiveMasterUrl(),
-      publicBase: effectivePublicBase() || null,
       envMasterUrl: !!ENV_MASTER_URL,
-      envPublicBase: !!PUBLIC_BASE,
       bundled: true,
     });
     return;
@@ -1831,20 +1829,13 @@ function handleAdmin(req, res, pathname) {
               s.masterUrl = null;
             }
           }
-          if (body.publicBase !== undefined) {
-            const v = String(body.publicBase || '').trim();
-            if (v) {
-              new URL(v); // validate
-              s.publicBase = v.replace(/\/+$/, '');
-            } else {
-              s.publicBase = null;
-            }
-          }
+          // publicBase was removed: the base URL comes from the BASE_URL env
+          // var only. A stale publicBase from an old panel is ignored.
+          delete s.publicBase;
           saveStateSync();
           sendJson(res, 200, {
             ok: true,
             masterUrl: effectiveMasterUrl(),
-            publicBase: effectivePublicBase() || null,
           });
         } catch (e) {
           sendJson(res, 400, { error: e.message });

@@ -612,9 +612,6 @@ function renderSettings() {
   const envMasterBadge = s.envMasterUrl
     ? '<span class="badge" style="color:#5c5c64;border-color:var(--border);background:var(--surface-2)">env default</span>'
     : '';
-  const envBaseBadge = s.envPublicBase
-    ? '<span class="badge" style="color:#5c5c64;border-color:var(--border);background:var(--surface-2)">env default</span>'
-    : '';
 
   $('#app').innerHTML = `
     <div class="shell">
@@ -642,13 +639,6 @@ function renderSettings() {
               <p class="hint">The single AIOStreams config every key proxies to. Leave empty to fall back to the
                 <code>MASTER_URL</code> env var. Find yours in the AIOStreams panel: Save &amp; Install → Copy URL
                 (AIOStreams runs inside the gate at <code>http://127.0.0.1:3210</code>).</p>
-            </div>
-            <div class="field">
-              <label for="set-base">Public base URL ${envBaseBadge}</label>
-              <input id="set-base" type="text" value="${esc(s.publicBase || '')}"
-                placeholder="https://gate.example.com" spellcheck="false">
-              <p class="hint">Used to build shareable key URLs and rewrites. Leave empty to fall back to
-                <code>PUBLIC_BASE</code> env or the request host.</p>
             </div>
             <div class="btn-row">
               <button class="btn" id="set-test" type="button">Test connection</button>
@@ -705,11 +695,10 @@ function renderSettings() {
         method: 'PATCH',
         body: JSON.stringify({
           masterUrl: $('#set-master').value.trim(),
-          publicBase: $('#set-base').value.trim(),
         }),
       });
       toast('Settings saved');
-      state.settings = { ...state.settings, masterUrl: r.masterUrl, publicBase: r.publicBase };
+      state.settings = { ...state.settings, masterUrl: r.masterUrl };
       statusEl.textContent = '';
       await refresh(); // refresh config (banner state, base url)
     } catch (err) {

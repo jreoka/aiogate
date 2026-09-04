@@ -99,7 +99,6 @@ SECRET_KEY=your-64-hex-char-key
 # 302 to the real path; the gate follows that redirect for meta lookups and
 # connection tests, and rewrites it for stream proxies.
 MASTER_URL=http://127.0.0.1:3210/stremio/u/your-alias/manifest.json
-PUBLIC_BASE=https://stream.dill.moe
 ```
 
 The gate's admin login reuses the **first `AIOSTREAMS_AUTH` pair** by default
@@ -157,7 +156,7 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `ADMIN_PASSWORD` | first `AIOSTREAMS_AUTH` pair | Gate admin password |
 | `ADMIN_USERNAME` | `admin` (or first `AIOSTREAMS_AUTH` user) | Gate admin username |
 | `SESSION_SECRET` | derived from password | HMAC key for session cookies |
-| `PUBLIC_BASE` | request host | Public base URL of the gate, used to build shareable key URLs. **Can also be set from the panel (Settings)** — panel value wins over this env fallback |
+| `BASE_URL` | request host | Public URL of the instance — AIOStreams uses it for playback links, and the gate uses it to build shareable key URLs and rewrites |
 | `PORT` | `3000` | Gate listen port (the only published port) |
 | `HOST` | `0.0.0.0` | Listen address |
 | `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (container sets `/app/data/keys.json`) |
@@ -172,16 +171,14 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 
 ## Panel settings
 
-`MASTER_URL` and `PUBLIC_BASE` don't have to be env vars. The panel's
-**Settings** tab edits both at runtime (stored in `keys.json` next to your
-keys; the env vars become fallback defaults):
+`MASTER_URL` doesn't have to be an env var. The panel's
+**Settings** tab edits it at runtime (stored in `keys.json` next to your
+keys; the env var is the fallback default):
 
 - **Master manifest URL** — the single AIOStreams config every key proxies to.
   A **Test connection** button probes the candidate URL's manifest before you
   save.
-- **Public base URL** — controls the shareable key URLs and rewrites.
-- Leaving a field empty removes the override and falls back to the env var
-  (or, for the base URL, the request host).
+- Leaving the field empty removes the override and falls back to the env var.
 
 The gate also boots fine with **no** `MASTER_URL` at all — the dashboard shows
 an amber banner until you set one in Settings, and `/go` requests return a
@@ -256,7 +253,7 @@ recovery codes, logout revocation).
 
 ## Deployment notes
 
-- Put it behind TLS (Caddy/Traefik/nginx) with `PUBLIC_BASE` set to the public
+- Put it behind TLS (Caddy/Traefik/nginx) with `BASE_URL` set to the public
   HTTPS URL. `docker compose` already mounts `./data:/app/data` — back it up.
 - The admin panel is the crown jewels: it now gates the entire AIOStreams
   surface too, so use a strong password (it defaults to your

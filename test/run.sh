@@ -12,8 +12,7 @@ sleep 0.6
 echo "== starting aio-gate (bundled) on :8085 =="
 MASTER_URL="http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json" \
 AIOSTREAMS_INTERNAL_URL="http://127.0.0.1:3900" \
-BASE_URL="https://stream.dill.moe" \
-PUBLIC_BASE="http://127.0.0.1:8085" \
+BASE_URL="http://127.0.0.1:8085" \
 ADMIN_USERNAME="admin" \
 ADMIN_PASSWORD="test-pw" \
 IMDB_SUGGEST_URL="http://127.0.0.1:3900" \

@@ -209,7 +209,6 @@ input:focus, textarea:focus { border-color: var(--accent); }
 
 .stat .num.green { color: var(--accent); }
 .stat .num.amber { color: var(--amber); }
-.stat .num.red { color: var(--red); }
 
 /* ---------- panels ---------- */
 
@@ -298,30 +297,6 @@ table.keys tr:last-child td { border-bottom: none; }
 
 table.keys tbody tr { transition: background .1s ease; }
 table.keys tbody tr:hover { background: var(--surface-2); }
-
-.key-cell { min-width: 170px; }
-
-.key-id {
-  font-family: var(--mono);
-  font-size: 13px;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 7px;
-}
-
-.key-url {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--faint);
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: block;
-  margin-top: 4px;
-}
 
 .label-cell { font-weight: 600; }
 .note-cell { color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 200px; }

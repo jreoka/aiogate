@@ -165,26 +165,11 @@ async function main() {
   });
   check('invalid master URL rejected', res.status === 400, res.status);
 
-  // override public base -> config endpoint and rewrites use it
-  await fetch(`${BASE}/panel/api/settings`, {
-    method: 'PATCH',
-    headers: authHeaders,
-    body: JSON.stringify({ publicBase: 'http://keyhost.test' }),
-  });
+  // key base URL comes from the BASE_URL env var
   res = await fetch(`${BASE}/panel/api/config`, { headers: authHeaders });
   check(
-    'publicBase override in config',
-    (await res.json()).publicBase === 'http://keyhost.test'
-  );
-  res = await fetch(`${BASE}/go/${kid}/stream/movie/tt123.json`, {
-    redirect: 'manual',
-  });
-  const locAfterOverride = res.headers.get('location') || '';
-  check(
-    'rewrites use overridden base',
-    (res.status === 302 && locAfterOverride.includes('http://keyhost.test/go/')) ||
-      (res.status === 200 && (await res.text()).includes('http://keyhost.test/go/')),
-    `status=${res.status} loc=${locAfterOverride}`
+    'config base reflects BASE_URL env',
+    (await res.json()).publicBase === 'http://127.0.0.1:8085'
   );
 
   // override master -> proxying follows it (dead host -> 502)
@@ -224,7 +209,7 @@ async function main() {
   await fetch(`${BASE}/panel/api/settings`, {
     method: 'PATCH',
     headers: authHeaders,
-    body: JSON.stringify({ masterUrl: '', publicBase: '' }),
+    body: JSON.stringify({ masterUrl: '' }),
   });
   res = await fetch(`${BASE}/go/${kid}/manifest.json`);
   check('cleared settings -> env master works again', res.status === 200);
