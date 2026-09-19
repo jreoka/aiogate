@@ -146,33 +146,50 @@ Two surfaces are never proxied by the key proxy: `/go/<key>/configure` and
 anything ending in `/configure` (a polite "managed by your provider" page), and
 invalid keys (404 / 403 when paused / 410 when revoked or expired).
 
-### Origin lock (optional)
+### Locking the gate to one URL (optional)
 
-Set `ALLOWED_ORIGIN` to a single web URL — usually the browser client your
-people actually use, e.g. `ALLOWED_ORIGIN=https://web.stremio.com` — and the
-gate serves that origin only. A request that carries an `Origin` (or, when
-there is no `Origin`, a `Referer`) pointing anywhere else is answered with:
+Set `ALLOWED_ORIGIN` to the gate's own public URL — the same value as
+`BASE_URL`, e.g. `ALLOWED_ORIGIN=https://stream.dill.moe` — and the gate
+refuses to serve anything reached through another URL. Two things are checked
+on every request:
+
+1. **Host.** The name the client asked for must be that URL's host. An
+   alternate domain pointed at the same container (or the raw IP, or
+   `localhost`) gets a 403, so the addon URL only works on the domain you
+   published — for the panel and for `/go/<key>/…` alike.
+2. **Origin.** A browser request that carries an `Origin` (or a `Referer` when
+   there is no `Origin`) must come from that exact origin — scheme and port
+   included. A page on another site can therefore neither call the addon URL
+   nor read a response from it.
 
 ```json
-{ "error": "forbidden", "message": "origin not allowed — this gate only serves https://web.stremio.com" }
+{ "error": "forbidden", "message": "this gate only answers on https://stream.dill.moe" }
+{ "error": "forbidden", "message": "requests must come from https://stream.dill.moe" }
 ```
 
 `Access-Control-Allow-Origin` also stops advertising `*` and answers with the
-allowed origin instead, so a page on another site can neither call the gate nor
-read a response from it.
+allowed origin instead, on gate responses and on proxied manifests/streams.
 
-What is **not** affected:
+Notes and edge cases:
 
-- Native Stremio apps (desktop/TV/mobile), `curl`, players and container health
-  probes send no `Origin`/`Referer` at all — they keep working, which is why
-  this locks out other *websites*, not other *apps*.
-- The gate's own panel and the embedded AIOStreams panel (same-origin requests,
-  plus `BASE_URL`), so you can't lock yourself out of the admin UI.
-
-Keep in mind that browser navigations from another site (clicking a key link in
-webmail or a chat app) carry a foreign `Referer` and are therefore refused too;
-users should open key URLs inside Stremio, or from the gate itself. A malformed
-`ALLOWED_ORIGIN` is a fatal boot error rather than a silently disabled lock.
+- Use the **gate's** URL, not the Stremio web origin: whichever origin you set
+  is the only one allowed, and the panel is bound by the same rule. If
+  `ALLOWED_ORIGIN`'s host differs from `BASE_URL`'s host, the gate logs a
+  warning at boot (that combination makes `BASE_URL` unreachable).
+- Native Stremio apps (desktop/TV/mobile), `curl` and players send no
+  `Origin`/`Referer` at all, so they keep working — as long as they use the
+  allowed URL. Only *other sites* are locked out.
+- Browsing the panel or a key URL from another site (a link in webmail or a
+  chat app) carries a foreign `Referer` and is refused; open the panel by its
+  URL and key URLs inside Stremio.
+- The scheme/port of the *incoming* connection are not compared (an HTTPS
+  proxy in front of a plain listener, and internal `Host` headers, keep
+  working) — the **name** is what is locked. The origin check, by contrast, is
+  an exact origin match.
+- `/healthz` skips the host check so the container healthcheck, which probes
+  `127.0.0.1`, still reports healthy.
+- A malformed `ALLOWED_ORIGIN` is a fatal boot error rather than a silently
+  disabled lock.
 
 ## Environment variables
 
@@ -190,7 +207,7 @@ users should open key URLs inside Stremio, or from the gate itself. A malformed
 | `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (container sets `/app/data/keys.json`) |
 | `REWRITE_ORIGINS` | master origin (+`BASE_URL`/internal) | Extra origins to rewrite to the gate |
 | `TRUST_PROXY` | `1` | Honor `X-Forwarded-Proto`/`Host` and `X-Forwarded-For`/`X-Real-IP` (real client IPs in key info, sessions, history, login rate-limiting). On by default — set `0` only if the gate is directly exposed with no proxy in front, so clients can't spoof those headers |
-| `ALLOWED_ORIGIN` | — (off) | Lock the gate to one web URL, e.g. `https://web.stremio.com`. When set, requests whose `Origin` (or `Referer`, when no `Origin` is sent) is any other origin get **403 Forbidden**, and `Access-Control-Allow-Origin` answers with that origin instead of `*`. Requests with neither header (native Stremio apps, curl, health probes) and same-origin requests (the gate panel) are unaffected |
+| `ALLOWED_ORIGIN` | — (off) | The gate's own public URL, e.g. `https://stream.dill.moe`. When set, the gate **only answers on that host** (alternate domains/IPs get 403 — panel and addon alike) and any browser request whose `Origin`/`Referer` is not that exact origin is refused; `Access-Control-Allow-Origin` answers with that origin instead of `*`. Native apps, players and curl (no `Origin`/`Referer`) keep working on the allowed URL; `/healthz` is exempt from the host check |
 | `KEY_LENGTH` | `12` | Key id length in characters (8–32) |
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |

@@ -36,10 +36,13 @@ services:
       # 3000 is exposed directly with no proxy in front, or clients can spoof
       # those headers.
       # TRUST_PROXY: "1"
-      # Lock the gate to one web origin — requests a browser marks as coming
-      # from any other site get 403 (native Stremio apps and the gate panel are
-      # unaffected). Unset = any origin.
-      # ALLOWED_ORIGIN: "https://web.stremio.com"
+      # Lock the gate to one URL (normally the same value as BASE_URL).
+      # The gate then only answers on that host — an alternate domain or the
+      # raw IP pointed at this container gets 403, panel and /go alike — and
+      # only browser requests from that exact origin are served. Native
+      # Stremio apps/players/curl (no Origin/Referer) still work on the
+      # allowed URL; /healthz stays reachable. Unset = any host/origin.
+      # ALLOWED_ORIGIN: "https://stream.dill.moe"
 
     volumes:
       - ./data:/app/data

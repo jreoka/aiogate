@@ -1,17 +1,20 @@
 'use strict';
 
 /*
- * origin-check.js — ALLOWED_ORIGIN (origin lock) tests.
+ * origin-check.js — ALLOWED_ORIGIN (host + origin lock) tests.
  *
- * Runs against a gate started with:
- *   ALLOWED_ORIGIN=https://web.stremio.test  BASE_URL=http://127.0.0.1:8088
+ * Runs against a gate started with its own public URL as the allowed origin:
+ *   ALLOWED_ORIGIN=http://127.0.0.1:8088  BASE_URL=http://127.0.0.1:8088
  *   ADMIN_USERNAME=admin ADMIN_PASSWORD=test-pw PORT=8088
  *   MASTER_URL=http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json
  * (test/run.sh starts it; the mock master must be up on :3900.)
  */
 
-const BASE = 'http://127.0.0.1:8088';
-const ALLOWED = 'https://web.stremio.test';
+const http = require('http');
+
+const PORT = 8088;
+const BASE = `http://127.0.0.1:${PORT}`;
+const ALLOWED = BASE;
 
 let failures = 0;
 
@@ -24,8 +27,26 @@ function check(name, cond, extra = '') {
   }
 }
 
+/** Raw request so a custom Host / X-Forwarded-Host can be sent (fetch forbids it). */
+function rawGet(path, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: PORT, path, method: 'GET', headers },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () =>
+          resolve({ status: res.statusCode, headers: res.headers, body })
+        );
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 async function main() {
-  // --- login (no Origin header, like a native client) ---
+  // --- login (no Origin header, like a native client or direct navigation) ---
   let res = await fetch(`${BASE}/panel/api/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -35,7 +56,7 @@ async function main() {
   const cookie = res.headers.get('set-cookie').split(';')[0];
   const authHeaders = { cookie, 'content-type': 'application/json' };
 
-  // --- create a key (same-origin POST: Origin = the gate's own origin) ---
+  // --- create a key (same-origin POST: Origin = the gate's own URL) ---
   res = await fetch(`${BASE}/panel/api/keys`, {
     method: 'POST',
     headers: { ...authHeaders, origin: BASE },
@@ -45,7 +66,7 @@ async function main() {
   const { key } = await res.json();
   const kid = key.id;
 
-  // --- no Origin / Referer: native apps, curl, probes ---
+  // --- no Origin / Referer: native apps, curl, players ---
   res = await fetch(`${BASE}/go/${kid}/manifest.json`);
   check('header-less request allowed', res.status === 200);
   check(
@@ -64,7 +85,7 @@ async function main() {
   res = await fetch(`${BASE}/go/${kid}/manifest.json`, {
     headers: { origin: 'https://evil.example' },
   });
-  const body = await res.json().catch(() => ({}));
+  let body = await res.json().catch(() => ({}));
   check('foreign origin forbidden', res.status === 403, `got ${res.status}`);
   check('foreign origin gets a forbidden error body', body.error === 'forbidden');
 
@@ -74,6 +95,12 @@ async function main() {
     body: JSON.stringify({ label: 'Nope' }),
   });
   check('foreign origin blocked on the admin API too', res.status === 403);
+
+  // Same host, different scheme is still a different origin.
+  res = await fetch(`${BASE}/go/${kid}/manifest.json`, {
+    headers: { origin: 'https://127.0.0.1:8088' },
+  });
+  check('same host, different scheme forbidden', res.status === 403, `got ${res.status}`);
 
   // --- Referer is used when no Origin is sent (top-level navigation) ---
   res = await fetch(`${BASE}/go/${kid}/manifest.json`, {
@@ -99,9 +126,54 @@ async function main() {
   });
   check('foreign preflight forbidden', res.status === 403, `got ${res.status}`);
 
-  // --- health probe (no Origin) stays reachable ---
-  res = await fetch(`${BASE}/healthz`);
-  check('health probe reaches upstream', res.status === 200 || res.status === 503);
+  // --- the addon URL behind another domain / IP does not work at all ---
+  let raw = await rawGet(`/go/${kid}/manifest.json`, { host: 'alt.example' });
+  body = JSON.parse(raw.body || '{}');
+  check('alternate domain (Host) forbidden', raw.status === 403, `got ${raw.status}`);
+  check(
+    'alternate domain error names the allowed URL',
+    body.error === 'forbidden' && String(body.message).includes(ALLOWED),
+    raw.body
+  );
+
+  // (302 = the allowed bare-manifest redirect; rawGet does not follow it)
+  raw = await rawGet(`/go/${kid}/manifest.json`, { host: '127.0.0.1' });
+  check('host without the port still matches', raw.status === 302, `got ${raw.status}`);
+
+  raw = await rawGet(`/go/${kid}/manifest.json`, {
+    host: 'alt.example',
+    origin: ALLOWED,
+  });
+  check('alternate domain refused even with the right origin', raw.status === 403);
+
+  // --- the admin panel is bound by the same lock ---
+  raw = await rawGet('/panel/', { host: 'alt.example' });
+  check('alternate domain cannot reach the panel', raw.status === 403, `got ${raw.status}`);
+  raw = await rawGet('/assets/app.css', { host: 'alt.example' });
+  check('alternate domain cannot reach panel assets', raw.status === 403, `got ${raw.status}`);
+  raw = await rawGet('/panel/', { host: `127.0.0.1:${PORT}` });
+  check('panel served on the allowed URL', raw.status === 200, `got ${raw.status}`);
+
+  // --- a proxy may keep the internal Host but forward the public one ---
+  raw = await rawGet(`/go/${kid}/manifest.json`, {
+    host: '127.0.0.1:9999',
+    'x-forwarded-host': ALLOWED.replace('http://', ''),
+  });
+  check('X-Forwarded-Host honored behind a proxy', raw.status === 302, `got ${raw.status}`);
+
+  // --- health probes stay reachable from localhost (container healthcheck) ---
+  raw = await rawGet('/healthz', { host: '127.0.0.1:8088' });
+  check(
+    'health probe reaches upstream',
+    raw.status === 200 || raw.status === 503,
+    `got ${raw.status}`
+  );
+  raw = await rawGet('/healthz', { host: '127.0.0.1:3000' });
+  check(
+    'health probe exempt from the host lock',
+    raw.status === 200 || raw.status === 503,
+    `got ${raw.status}`
+  );
 
   await fetch(`${BASE}/panel/api/keys/${kid}`, {
     method: 'DELETE',

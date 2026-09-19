@@ -47,13 +47,14 @@ kill $SESSIONS_GATE_PID 2>/dev/null || true
 SESSIONS_GATE_PID=""
 rm -f test/data-sessions.json
 
-# The origin lock needs its own gate instance (fresh data file) on :8088.
-echo "== running ALLOWED_ORIGIN origin-lock test =="
+# The origin lock needs its own gate instance (fresh data file) on :8088 —
+# ALLOWED_ORIGIN is the gate's own public URL, as in a real deployment.
+echo "== running ALLOWED_ORIGIN host/origin-lock test =="
 rm -f test/data-origin.json
 MASTER_URL="http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json" \
 AIOSTREAMS_INTERNAL_URL="http://127.0.0.1:3900" \
 BASE_URL="http://127.0.0.1:8088" \
-ALLOWED_ORIGIN="https://web.stremio.test" \
+ALLOWED_ORIGIN="http://127.0.0.1:8088" \
 ADMIN_USERNAME="admin" \
 ADMIN_PASSWORD="test-pw" \
 IMDB_SUGGEST_URL="http://127.0.0.1:3900" \

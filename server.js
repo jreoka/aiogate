@@ -53,13 +53,28 @@ const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
 const GATE_BASE = ((ENV.BASE_URL || ENV.PUBLIC_BASE || '').trim()).replace(/\/+$/, '');
 const TRUST_PROXY = !isFalsy(ENV.TRUST_PROXY);
-// Optional origin allowlist: the one web URL allowed to talk to the gate
-// (e.g. https://web.stremio.com). When set, any request a browser marks as
-// coming from a different site (Origin, or Referer when there is no Origin)
-// is refused with 403 Forbidden, and CORS drops the `*` wildcard for that
-// origin. Requests with no Origin/Referer at all (native Stremio apps, curl,
-// health probes) and same-origin requests (the gate's own panel) still work.
+// Origin/host lock: the one public URL this gate serves (e.g.
+// https://stream.dill.moe). When set it is enforced on every request:
+// requests that arrive through any other URL/host — an alternate domain
+// pointed at the same service, an IP, localhost — are refused with 403, and
+// so is any browser request whose Origin/Referer is not that exact origin.
+// Header-less clients (native Stremio apps, players, curl) still work, as
+// long as they use the allowed URL. `/healthz` skips the host check so the
+// container healthcheck (which probes 127.0.0.1) keeps working.
 const ALLOWED_ORIGIN = parseAllowedOriginEnv(ENV.ALLOWED_ORIGIN);
+const ALLOWED_HOST = ALLOWED_ORIGIN ? new URL(ALLOWED_ORIGIN).hostname : null;
+if (ALLOWED_ORIGIN && GATE_BASE) {
+  try {
+    const baseHost = new URL(GATE_BASE).hostname;
+    if (baseHost !== ALLOWED_HOST) {
+      console.warn(
+        `[boot] WARNING: ALLOWED_ORIGIN host (${ALLOWED_HOST}) differs from BASE_URL host (${baseHost}) — requests to ${GATE_BASE} will get 403; set ALLOWED_ORIGIN to your gate's public URL`
+      );
+    }
+  } catch {
+    /* GATE_BASE already validated elsewhere; ignore */
+  }
+}
 const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 // Watch history retention: entries older than this are pruned automatically
 // to keep the data file small. Configurable via HISTORY_RETENTION_DAYS.
@@ -1360,49 +1375,51 @@ function requestOrigin(req) {
 }
 
 /**
- * Origins that mean "this request is aimed at the gate itself". BASE_URL
- * (env, trusted) plus the host the client actually asked for. `Host` is set
- * by the browser from the request URL and cannot be forged by page script,
- * so this can't be abused to smuggle a foreign origin past the check.
+ * Hostnames the client could have asked for. `Host` is set by the browser or
+ * HTTP client from the request URL, so page script cannot forge it; when
+ * TRUST_PROXY is on we also accept `X-Forwarded-Host` (same trust the gate
+ * already extends to it when building public URLs) for proxies that rewrite
+ * Host to the internal address. Forwarding lists use the first hop.
  */
-function selfOrigins(req) {
+function requestHostnames(req) {
   const out = [];
-  const base = effectivePublicBase();
-  if (base) {
+  for (const raw of [
+    req.headers['host'],
+    TRUST_PROXY ? req.headers['x-forwarded-host'] : null,
+  ]) {
+    if (!raw) continue;
+    const first = String(raw).split(',')[0].trim();
+    if (!first) continue;
     try {
-      out.push(new URL(base).origin);
+      out.push(new URL(`http://${first}`).hostname);
     } catch {
-      /* ignore */
-    }
-  }
-  const proto =
-    TRUST_PROXY && req.headers['x-forwarded-proto']
-      ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
-      : req.socket && req.socket.encrypted
-        ? 'https'
-        : 'http';
-  const host = req.headers['host'];
-  if (host) {
-    try {
-      out.push(new URL(`${proto}://${host}`).origin);
-    } catch {
-      /* ignore */
+      /* unparsable host -> ignore */
     }
   }
   return out;
 }
 
 /**
- * true when ALLOWED_ORIGIN is set and the request comes from some other web
- * origin. Header-less clients (native Stremio apps, curl, health probes) and
- * the gate's own origin are always let through.
+ * Why a request must be refused, or null when it may be served.
+ *
+ * - `host`   — the gate was reached through a URL that is not ALLOWED_ORIGIN
+ *              (an alternate domain pointed at the same service, an IP,
+ *              localhost). `/healthz` opts out so the container healthcheck,
+ *              which probes 127.0.0.1, keeps reporting healthy.
+ * - `origin` — a browser page from another origin called the gate: only
+ *              ALLOWED_ORIGIN itself may use the addon URL.
+ *
+ * Requests without an Origin/Referer (native Stremio apps, players, curl)
+ * pass the origin check and only need to use the allowed URL. Scheme/port
+ * are not compared, so an https proxy in front of a plain-HTTP listener (and
+ * its internal Host) is fine; the *name* is what is locked.
  */
-function originForbidden(req) {
-  if (!ALLOWED_ORIGIN) return false;
+function originBlockReason(req, skipHost) {
+  if (!ALLOWED_ORIGIN) return null;
+  if (!skipHost && !requestHostnames(req).includes(ALLOWED_HOST)) return 'host';
   const origin = requestOrigin(req);
-  if (!origin) return false;
-  if (origin === ALLOWED_ORIGIN) return false;
-  return !selfOrigins(req).includes(origin);
+  if (origin && origin !== ALLOWED_ORIGIN) return 'origin';
+  return null;
 }
 
 /**
@@ -2482,14 +2499,23 @@ function handleBundledRoot(req, res) {
 const server = http.createServer((req, res) => {
   const pathname = req.url.split('?')[0];
   try {
-    // ALLOWED_ORIGIN gate: refuse browser traffic from any other origin.
-    if (originForbidden(req)) {
+    // ALLOWED_ORIGIN lock: only the configured URL may use this gate, and
+    // only browser requests from that exact origin.
+    const originBlock = originBlockReason(req, pathname === '/healthz');
+    if (originBlock) {
+      const detail =
+        originBlock === 'host'
+          ? `host=${req.headers['host'] || '?'}`
+          : `origin=${requestOrigin(req)}`;
       console.log(
-        `[${new Date().toISOString()}] forbidden origin=${requestOrigin(req)} ${req.method} ${req.url}`
+        `[${new Date().toISOString()}] forbidden ${detail} ${req.method} ${req.url}`
       );
       sendJson(res, 403, {
         error: 'forbidden',
-        message: `origin not allowed — this gate only serves ${ALLOWED_ORIGIN}`,
+        message:
+          originBlock === 'host'
+            ? `this gate only answers on ${ALLOWED_ORIGIN}`
+            : `requests must come from ${ALLOWED_ORIGIN}`,
       });
       return;
     }
@@ -2560,7 +2586,7 @@ server.listen(PORT, HOST, () => {
   );
   console.log(
     ALLOWED_ORIGIN
-      ? `[boot] origin allowlist: only ${ALLOWED_ORIGIN} (+ header-less clients) may use this gate — other origins get 403`
-      : '[boot] origin allowlist: off (ALLOWED_ORIGIN unset) — any origin may use this gate'
+      ? `[boot] lock: only ${ALLOWED_ORIGIN} is served (host ${ALLOWED_HOST}, /healthz exempt) — other hosts and origins get 403`
+      : '[boot] lock: off (ALLOWED_ORIGIN unset) — the gate answers on any host/origin'
   );
 });
