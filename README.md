@@ -146,6 +146,34 @@ Two surfaces are never proxied by the key proxy: `/go/<key>/configure` and
 anything ending in `/configure` (a polite "managed by your provider" page), and
 invalid keys (404 / 403 when paused / 410 when revoked or expired).
 
+### Origin lock (optional)
+
+Set `ALLOWED_ORIGIN` to a single web URL — usually the browser client your
+people actually use, e.g. `ALLOWED_ORIGIN=https://web.stremio.com` — and the
+gate serves that origin only. A request that carries an `Origin` (or, when
+there is no `Origin`, a `Referer`) pointing anywhere else is answered with:
+
+```json
+{ "error": "forbidden", "message": "origin not allowed — this gate only serves https://web.stremio.com" }
+```
+
+`Access-Control-Allow-Origin` also stops advertising `*` and answers with the
+allowed origin instead, so a page on another site can neither call the gate nor
+read a response from it.
+
+What is **not** affected:
+
+- Native Stremio apps (desktop/TV/mobile), `curl`, players and container health
+  probes send no `Origin`/`Referer` at all — they keep working, which is why
+  this locks out other *websites*, not other *apps*.
+- The gate's own panel and the embedded AIOStreams panel (same-origin requests,
+  plus `BASE_URL`), so you can't lock yourself out of the admin UI.
+
+Keep in mind that browser navigations from another site (clicking a key link in
+webmail or a chat app) carry a foreign `Referer` and are therefore refused too;
+users should open key URLs inside Stremio, or from the gate itself. A malformed
+`ALLOWED_ORIGIN` is a fatal boot error rather than a silently disabled lock.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -162,6 +190,7 @@ invalid keys (404 / 403 when paused / 410 when revoked or expired).
 | `DATA_FILE` | `<cwd>/data/keys.json` | Keys database (container sets `/app/data/keys.json`) |
 | `REWRITE_ORIGINS` | master origin (+`BASE_URL`/internal) | Extra origins to rewrite to the gate |
 | `TRUST_PROXY` | `1` | Honor `X-Forwarded-Proto`/`Host` and `X-Forwarded-For`/`X-Real-IP` (real client IPs in key info, sessions, history, login rate-limiting). On by default — set `0` only if the gate is directly exposed with no proxy in front, so clients can't spoof those headers |
+| `ALLOWED_ORIGIN` | — (off) | Lock the gate to one web URL, e.g. `https://web.stremio.com`. When set, requests whose `Origin` (or `Referer`, when no `Origin` is sent) is any other origin get **403 Forbidden**, and `Access-Control-Allow-Origin` answers with that origin instead of `*`. Requests with neither header (native Stremio apps, curl, health probes) and same-origin requests (the gate panel) are unaffected |
 | `KEY_LENGTH` | `12` | Key id length in characters (8–32) |
 | `HISTORY_RETENTION_DAYS` | `30` | How long each key's watch history is kept before it is pruned (1–365) |
 | `HISTORY_MAX_PER_KEY` | `2000` | Max watch-history entries kept per key (newest win; safety cap) |

@@ -36,6 +36,10 @@ services:
       # 3000 is exposed directly with no proxy in front, or clients can spoof
       # those headers.
       # TRUST_PROXY: "1"
+      # Lock the gate to one web origin — requests a browser marks as coming
+      # from any other site get 403 (native Stremio apps and the gate panel are
+      # unaffected). Unset = any origin.
+      # ALLOWED_ORIGIN: "https://web.stremio.com"
 
     volumes:
       - ./data:/app/data

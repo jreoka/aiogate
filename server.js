@@ -53,6 +53,13 @@ const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
 const GATE_BASE = ((ENV.BASE_URL || ENV.PUBLIC_BASE || '').trim()).replace(/\/+$/, '');
 const TRUST_PROXY = !isFalsy(ENV.TRUST_PROXY);
+// Optional origin allowlist: the one web URL allowed to talk to the gate
+// (e.g. https://web.stremio.com). When set, any request a browser marks as
+// coming from a different site (Origin, or Referer when there is no Origin)
+// is refused with 403 Forbidden, and CORS drops the `*` wildcard for that
+// origin. Requests with no Origin/Referer at all (native Stremio apps, curl,
+// health probes) and same-origin requests (the gate's own panel) still work.
+const ALLOWED_ORIGIN = parseAllowedOriginEnv(ENV.ALLOWED_ORIGIN);
 const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 // Watch history retention: entries older than this are pruned automatically
 // to keep the data file small. Configurable via HISTORY_RETENTION_DAYS.
@@ -237,7 +244,7 @@ function sendJson(res, status, obj) {
     res.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
-      'access-control-allow-origin': '*',
+      'access-control-allow-origin': allowOriginHeader(),
     });
   }
   res.end(body);
@@ -301,6 +308,32 @@ function parseOrigin(raw) {
     port: url.port,
     hostHeader: url.host,
   };
+}
+
+/**
+ * Parse ALLOWED_ORIGIN into a bare origin (`https://host[:port]`), or null
+ * when unset. An unusable value is fatal at boot instead of silently
+ * disabling the restriction.
+ */
+function parseAllowedOriginEnv(raw) {
+  const v = (raw || '').trim();
+  if (!v) return null;
+  let url;
+  try {
+    url = new URL(v);
+  } catch (e) {
+    console.error(`FATAL: ALLOWED_ORIGIN is not a valid URL: ${e.message}`);
+    process.exit(1);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    console.error('FATAL: ALLOWED_ORIGIN must be an http:// or https:// URL');
+    process.exit(1);
+  }
+  if (url.origin === 'null') {
+    console.error('FATAL: ALLOWED_ORIGIN must include a host');
+    process.exit(1);
+  }
+  return url.origin;
 }
 
 /* ------------------------------------------------------------
@@ -1294,6 +1327,108 @@ function getGateBase(req) {
   return `${proto}://${host}`;
 }
 
+/* ------------------------------------------------------------
+ * Origin allowlist (ALLOWED_ORIGIN)
+ * ------------------------------------------------------------ */
+
+/**
+ * The page origin a request claims to come from: the Origin header when it
+ * carries a usable value (the literal `null` of sandboxed/file:// pages is
+ * kept as-is, so it never matches an http(s) allowlist), else the origin of
+ * the Referer. Null when the request carries neither.
+ */
+function requestOrigin(req) {
+  const raw = req.headers.origin;
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const v = String(raw).trim();
+    if (v === 'null') return 'null';
+    try {
+      return new URL(v).origin;
+    } catch {
+      return null;
+    }
+  }
+  const ref = req.headers.referer || req.headers.referrer;
+  if (ref) {
+    try {
+      return new URL(String(ref)).origin;
+    } catch {
+      /* unparsable referer -> treat as absent */
+    }
+  }
+  return null;
+}
+
+/**
+ * Origins that mean "this request is aimed at the gate itself". BASE_URL
+ * (env, trusted) plus the host the client actually asked for. `Host` is set
+ * by the browser from the request URL and cannot be forged by page script,
+ * so this can't be abused to smuggle a foreign origin past the check.
+ */
+function selfOrigins(req) {
+  const out = [];
+  const base = effectivePublicBase();
+  if (base) {
+    try {
+      out.push(new URL(base).origin);
+    } catch {
+      /* ignore */
+    }
+  }
+  const proto =
+    TRUST_PROXY && req.headers['x-forwarded-proto']
+      ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
+      : req.socket && req.socket.encrypted
+        ? 'https'
+        : 'http';
+  const host = req.headers['host'];
+  if (host) {
+    try {
+      out.push(new URL(`${proto}://${host}`).origin);
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
+}
+
+/**
+ * true when ALLOWED_ORIGIN is set and the request comes from some other web
+ * origin. Header-less clients (native Stremio apps, curl, health probes) and
+ * the gate's own origin are always let through.
+ */
+function originForbidden(req) {
+  if (!ALLOWED_ORIGIN) return false;
+  const origin = requestOrigin(req);
+  if (!origin) return false;
+  if (origin === ALLOWED_ORIGIN) return false;
+  return !selfOrigins(req).includes(origin);
+}
+
+/**
+ * Access-Control-Allow-Origin for responses. With ALLOWED_ORIGIN set the
+ * wildcard is replaced by that single origin — everything else is already
+ * refused with 403 before it reaches a handler.
+ */
+function allowOriginHeader() {
+  return ALLOWED_ORIGIN || '*';
+}
+
+/**
+ * Pin `access-control-allow-origin` on a set of upstream response headers.
+ * With ALLOWED_ORIGIN set the gate owns CORS and answers with that single
+ * origin (an upstream `*` is dropped, so proxied manifests/streams stop
+ * advertising the wildcard too); otherwise upstream headers pass untouched.
+ */
+function pinCorsHeader(headers) {
+  if (!ALLOWED_ORIGIN) return headers;
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'access-control-allow-origin') delete headers[k];
+  }
+  headers['access-control-allow-origin'] = ALLOWED_ORIGIN;
+  return headers;
+}
+
 /**
  * Map a gate suffix (the part after /go/<key>) to a path on the master.
  */
@@ -1413,6 +1548,7 @@ function forward(req, res, keyRec, suffix) {
         if (lk === 'content-length' && rewriteBody) continue; // recompute below
         outHeaders[k] = v;
       }
+      pinCorsHeader(outHeaders);
 
       const finish = (statusCode) => {
         touchKey(keyRec, ip);
@@ -1570,6 +1706,7 @@ function forwardPanel(req, res) {
         if (HOP_BY_HOP.has(lk)) continue;
         outHeaders[k] = v;
       }
+      pinCorsHeader(outHeaders);
       res.writeHead(status, outHeaders);
       upRes.pipe(res);
       upRes.on('error', () => res.destroy());
@@ -1653,7 +1790,7 @@ function handleProxy(req, res, pathname) {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'access-control-allow-origin': '*',
+      'access-control-allow-origin': allowOriginHeader(),
       'access-control-allow-methods': 'GET, HEAD, OPTIONS',
       'access-control-allow-headers': '*',
       'access-control-max-age': '86400',
@@ -2243,7 +2380,7 @@ function servePanelFile(res, relFile) {
 function handlePanel(req, res, pathname) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'access-control-allow-origin': '*',
+      'access-control-allow-origin': allowOriginHeader(),
       'access-control-allow-methods': 'POST, GET, PATCH, DELETE, OPTIONS',
       'access-control-allow-headers': 'content-type',
       'access-control-max-age': '86400',
@@ -2308,7 +2445,7 @@ function handleHealth(req, res) {
 function handleBundledRoot(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'access-control-allow-origin': '*',
+      'access-control-allow-origin': allowOriginHeader(),
       'access-control-allow-methods': 'GET, HEAD, POST, PATCH, DELETE, OPTIONS',
       'access-control-allow-headers': '*',
       'access-control-max-age': '86400',
@@ -2345,6 +2482,17 @@ function handleBundledRoot(req, res) {
 const server = http.createServer((req, res) => {
   const pathname = req.url.split('?')[0];
   try {
+    // ALLOWED_ORIGIN gate: refuse browser traffic from any other origin.
+    if (originForbidden(req)) {
+      console.log(
+        `[${new Date().toISOString()}] forbidden origin=${requestOrigin(req)} ${req.method} ${req.url}`
+      );
+      sendJson(res, 403, {
+        error: 'forbidden',
+        message: `origin not allowed — this gate only serves ${ALLOWED_ORIGIN}`,
+      });
+      return;
+    }
     if (pathname === '/healthz') {
       handleHealth(req, res);
       return;
@@ -2409,5 +2557,10 @@ server.listen(PORT, HOST, () => {
   );
   console.log(
     `[boot] shareable key base: ${effectivePublicBase() || 'http://' + HOST + ':' + PORT}/go/<key>/manifest.json`
+  );
+  console.log(
+    ALLOWED_ORIGIN
+      ? `[boot] origin allowlist: only ${ALLOWED_ORIGIN} (+ header-less clients) may use this gate — other origins get 403`
+      : '[boot] origin allowlist: off (ALLOWED_ORIGIN unset) — any origin may use this gate'
   );
 });
