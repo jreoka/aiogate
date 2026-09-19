@@ -161,9 +161,8 @@ things are checked on every request:
    included. A page on another site can therefore neither call the addon URL
    nor read a response from it.
 
-```json
-{ "error": "forbidden", "message": "this gate only answers on https://stream.dill.moe" }
-{ "error": "forbidden", "message": "requests must come from https://stream.dill.moe" }
+```text
+Forbidden
 ```
 
 `Access-Control-Allow-Origin` also stops advertising `*` and answers with

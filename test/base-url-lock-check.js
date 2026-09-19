@@ -85,9 +85,13 @@ async function main() {
   res = await fetch(`${BASE}/go/${kid}/manifest.json`, {
     headers: { origin: 'https://evil.example' },
   });
-  let body = await res.json().catch(() => ({}));
+  let body = await res.text();
   check('foreign origin forbidden', res.status === 403, `got ${res.status}`);
-  check('foreign origin gets a forbidden error body', body.error === 'forbidden');
+  check(
+    'foreign origin gets a plain Forbidden body',
+    body.trim() === 'Forbidden',
+    body
+  );
 
   res = await fetch(`${BASE}/panel/api/keys`, {
     method: 'POST',
@@ -128,11 +132,10 @@ async function main() {
 
   // --- the addon URL behind another domain / IP does not work at all ---
   let raw = await rawGet(`/go/${kid}/manifest.json`, { host: 'alt.example' });
-  body = JSON.parse(raw.body || '{}');
   check('alternate domain (Host) forbidden', raw.status === 403, `got ${raw.status}`);
   check(
-    'alternate domain error names the allowed URL',
-    body.error === 'forbidden' && String(body.message).includes(ALLOWED),
+    'alternate domain gets a plain Forbidden body',
+    raw.body.trim() === 'Forbidden',
     raw.body
   );
 

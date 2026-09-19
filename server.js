@@ -2501,13 +2501,12 @@ const server = http.createServer((req, res) => {
       console.log(
         `[${new Date().toISOString()}] forbidden ${detail} ${req.method} ${req.url}`
       );
-      sendJson(res, 403, {
-        error: 'forbidden',
-        message:
-          originBlock === 'host'
-            ? `this gate only answers on ${LOCK.origin}`
-            : `requests must come from ${LOCK.origin}`,
+      res.writeHead(403, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'access-control-allow-origin': allowOriginHeader(),
       });
+      res.end('Forbidden');
       return;
     }
     if (pathname === '/healthz') {
