@@ -53,28 +53,15 @@ const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
 const GATE_BASE = ((ENV.BASE_URL || ENV.PUBLIC_BASE || '').trim()).replace(/\/+$/, '');
 const TRUST_PROXY = !isFalsy(ENV.TRUST_PROXY);
-// Origin/host lock: the one public URL this gate serves (e.g.
-// https://stream.dill.moe). When set it is enforced on every request:
-// requests that arrive through any other URL/host — an alternate domain
-// pointed at the same service, an IP, localhost — are refused with 403, and
-// so is any browser request whose Origin/Referer is not that exact origin.
-// Header-less clients (native Stremio apps, players, curl) still work, as
-// long as they use the allowed URL. `/healthz` skips the host check so the
-// container healthcheck (which probes 127.0.0.1) keeps working.
-const ALLOWED_ORIGIN = parseAllowedOriginEnv(ENV.ALLOWED_ORIGIN);
-const ALLOWED_HOST = ALLOWED_ORIGIN ? new URL(ALLOWED_ORIGIN).hostname : null;
-if (ALLOWED_ORIGIN && GATE_BASE) {
-  try {
-    const baseHost = new URL(GATE_BASE).hostname;
-    if (baseHost !== ALLOWED_HOST) {
-      console.warn(
-        `[boot] WARNING: ALLOWED_ORIGIN host (${ALLOWED_HOST}) differs from BASE_URL host (${baseHost}) — requests to ${GATE_BASE} will get 403; set ALLOWED_ORIGIN to your gate's public URL`
-      );
-    }
-  } catch {
-    /* GATE_BASE already validated elsewhere; ignore */
-  }
-}
+// BASE_URL doubles as the access lock: while it is set, the gate only answers
+// on that URL's host — an alternate domain pointed at the same container (or
+// an IP, or localhost) is refused with 403 — and only browser requests whose
+// Origin/Referer is that exact origin are served. Unset means no lock: the
+// gate builds its own URLs from the request host and answers on any host.
+// Header-less clients (native Stremio apps, players, curl) work as long as
+// they use BASE_URL's host; `/healthz` skips the host check so the container
+// healthcheck (which probes 127.0.0.1) keeps working.
+const LOCK = parseBaseUrlLock(GATE_BASE);
 const KEY_LENGTH = clampInt(ENV.KEY_LENGTH, 12, 8, 32);
 // Watch history retention: entries older than this are pruned automatically
 // to keep the data file small. Configurable via HISTORY_RETENTION_DAYS.
@@ -326,29 +313,31 @@ function parseOrigin(raw) {
 }
 
 /**
- * Parse ALLOWED_ORIGIN into a bare origin (`https://host[:port]`), or null
- * when unset. An unusable value is fatal at boot instead of silently
- * disabling the restriction.
+ * Turn BASE_URL into the access lock (`{ origin, hostname }`), or null when
+ * BASE_URL is unset. A malformed value is fatal at boot: it would otherwise
+ * mean broken shareable URLs *and* a silently disabled lock.
  */
-function parseAllowedOriginEnv(raw) {
+function parseBaseUrlLock(raw) {
   const v = (raw || '').trim();
   if (!v) return null;
   let url;
   try {
     url = new URL(v);
-  } catch (e) {
-    console.error(`FATAL: ALLOWED_ORIGIN is not a valid URL: ${e.message}`);
+  } catch {
+    console.error(
+      'FATAL: BASE_URL is not a valid URL — include the scheme, e.g. BASE_URL=https://stream.dill.moe'
+    );
     process.exit(1);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    console.error('FATAL: ALLOWED_ORIGIN must be an http:// or https:// URL');
+    console.error('FATAL: BASE_URL must be an http:// or https:// URL');
     process.exit(1);
   }
   if (url.origin === 'null') {
-    console.error('FATAL: ALLOWED_ORIGIN must include a host');
+    console.error('FATAL: BASE_URL must include a host');
     process.exit(1);
   }
-  return url.origin;
+  return { origin: url.origin, hostname: url.hostname };
 }
 
 /* ------------------------------------------------------------
@@ -1343,7 +1332,7 @@ function getGateBase(req) {
 }
 
 /* ------------------------------------------------------------
- * Origin allowlist (ALLOWED_ORIGIN)
+ * Access lock (BASE_URL)
  * ------------------------------------------------------------ */
 
 /**
@@ -1402,47 +1391,49 @@ function requestHostnames(req) {
 /**
  * Why a request must be refused, or null when it may be served.
  *
- * - `host`   — the gate was reached through a URL that is not ALLOWED_ORIGIN
- *              (an alternate domain pointed at the same service, an IP,
- *              localhost). `/healthz` opts out so the container healthcheck,
- *              which probes 127.0.0.1, keeps reporting healthy.
+ * - `host`   — the gate was reached through a URL whose host is not
+ *              BASE_URL's (an alternate domain pointed at the same
+ *              container, an IP, localhost). `/healthz` opts out so the
+ *              container healthcheck, which probes 127.0.0.1, keeps
+ *              reporting healthy.
  * - `origin` — a browser page from another origin called the gate: only
- *              ALLOWED_ORIGIN itself may use the addon URL.
+ *              BASE_URL itself may use the addon URL.
  *
  * Requests without an Origin/Referer (native Stremio apps, players, curl)
- * pass the origin check and only need to use the allowed URL. Scheme/port
- * are not compared, so an https proxy in front of a plain-HTTP listener (and
- * its internal Host) is fine; the *name* is what is locked.
+ * pass the origin check and only need to use BASE_URL's host. Scheme/port are
+ * not compared, so an https proxy in front of a plain-HTTP listener (and its
+ * internal Host) is fine; the *name* is what is locked. With BASE_URL unset
+ * there is no lock at all.
  */
 function originBlockReason(req, skipHost) {
-  if (!ALLOWED_ORIGIN) return null;
-  if (!skipHost && !requestHostnames(req).includes(ALLOWED_HOST)) return 'host';
+  if (!LOCK) return null;
+  if (!skipHost && !requestHostnames(req).includes(LOCK.hostname)) return 'host';
   const origin = requestOrigin(req);
-  if (origin && origin !== ALLOWED_ORIGIN) return 'origin';
+  if (origin && origin !== LOCK.origin) return 'origin';
   return null;
 }
 
 /**
- * Access-Control-Allow-Origin for responses. With ALLOWED_ORIGIN set the
- * wildcard is replaced by that single origin — everything else is already
- * refused with 403 before it reaches a handler.
+ * Access-Control-Allow-Origin for responses. With BASE_URL set the wildcard
+ * is replaced by that single origin — everything else is already refused with
+ * 403 before it reaches a handler.
  */
 function allowOriginHeader() {
-  return ALLOWED_ORIGIN || '*';
+  return LOCK ? LOCK.origin : '*';
 }
 
 /**
  * Pin `access-control-allow-origin` on a set of upstream response headers.
- * With ALLOWED_ORIGIN set the gate owns CORS and answers with that single
- * origin (an upstream `*` is dropped, so proxied manifests/streams stop
- * advertising the wildcard too); otherwise upstream headers pass untouched.
+ * With BASE_URL set the gate owns CORS and answers with that single origin
+ * (an upstream `*` is dropped, so proxied manifests/streams stop advertising
+ * the wildcard too); otherwise upstream headers pass untouched.
  */
 function pinCorsHeader(headers) {
-  if (!ALLOWED_ORIGIN) return headers;
+  if (!LOCK) return headers;
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === 'access-control-allow-origin') delete headers[k];
   }
-  headers['access-control-allow-origin'] = ALLOWED_ORIGIN;
+  headers['access-control-allow-origin'] = LOCK.origin;
   return headers;
 }
 
@@ -2499,8 +2490,8 @@ function handleBundledRoot(req, res) {
 const server = http.createServer((req, res) => {
   const pathname = req.url.split('?')[0];
   try {
-    // ALLOWED_ORIGIN lock: only the configured URL may use this gate, and
-    // only browser requests from that exact origin.
+    // BASE_URL lock: while BASE_URL is set, only that address may use this
+    // gate, and only browser requests from that exact origin.
     const originBlock = originBlockReason(req, pathname === '/healthz');
     if (originBlock) {
       const detail =
@@ -2514,8 +2505,8 @@ const server = http.createServer((req, res) => {
         error: 'forbidden',
         message:
           originBlock === 'host'
-            ? `this gate only answers on ${ALLOWED_ORIGIN}`
-            : `requests must come from ${ALLOWED_ORIGIN}`,
+            ? `this gate only answers on ${LOCK.origin}`
+            : `requests must come from ${LOCK.origin}`,
       });
       return;
     }
@@ -2585,8 +2576,8 @@ server.listen(PORT, HOST, () => {
     `[boot] shareable key base: ${effectivePublicBase() || 'http://' + HOST + ':' + PORT}/go/<key>/manifest.json`
   );
   console.log(
-    ALLOWED_ORIGIN
-      ? `[boot] lock: only ${ALLOWED_ORIGIN} is served (host ${ALLOWED_HOST}, /healthz exempt) — other hosts and origins get 403`
-      : '[boot] lock: off (ALLOWED_ORIGIN unset) — the gate answers on any host/origin'
+    LOCK
+      ? `[boot] lock: BASE_URL=${LOCK.origin} is the only address served (host ${LOCK.hostname}, /healthz exempt) — other hosts and origins get 403`
+      : '[boot] lock: off (BASE_URL unset) — the gate answers on any host/origin'
   );
 });

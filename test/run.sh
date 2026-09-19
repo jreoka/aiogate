@@ -47,27 +47,26 @@ kill $SESSIONS_GATE_PID 2>/dev/null || true
 SESSIONS_GATE_PID=""
 rm -f test/data-sessions.json
 
-# The origin lock needs its own gate instance (fresh data file) on :8088 —
-# ALLOWED_ORIGIN is the gate's own public URL, as in a real deployment.
-echo "== running ALLOWED_ORIGIN host/origin-lock test =="
-rm -f test/data-origin.json
+# The BASE_URL lock needs its own gate instance (fresh data file) on :8088 —
+# BASE_URL is the gate's own public URL, as in a real deployment.
+echo "== running BASE_URL host/origin-lock test =="
+rm -f test/data-lock.json
 MASTER_URL="http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json" \
 AIOSTREAMS_INTERNAL_URL="http://127.0.0.1:3900" \
 BASE_URL="http://127.0.0.1:8088" \
-ALLOWED_ORIGIN="http://127.0.0.1:8088" \
 ADMIN_USERNAME="admin" \
 ADMIN_PASSWORD="test-pw" \
 IMDB_SUGGEST_URL="http://127.0.0.1:3900" \
 PORT=8088 \
-DATA_FILE="$(pwd)/test/data-origin.json" \
+DATA_FILE="$(pwd)/test/data-lock.json" \
 node server.js &
-ORIGIN_GATE_PID=$!
-trap 'kill $MOCK_PID $GATE_PID $SESSIONS_GATE_PID $ORIGIN_GATE_PID 2>/dev/null || true' EXIT
+LOCK_GATE_PID=$!
+trap 'kill $MOCK_PID $GATE_PID $SESSIONS_GATE_PID $LOCK_GATE_PID 2>/dev/null || true' EXIT
 sleep 1
-node test/origin-check.js
-kill $ORIGIN_GATE_PID 2>/dev/null || true
-ORIGIN_GATE_PID=""
-rm -f test/data-origin.json
+node test/base-url-lock-check.js
+kill $LOCK_GATE_PID 2>/dev/null || true
+LOCK_GATE_PID=""
+rm -f test/data-lock.json
 
 echo "== stopping =="
 kill $GATE_PID $MOCK_PID 2>/dev/null || true

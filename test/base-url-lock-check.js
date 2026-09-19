@@ -1,10 +1,10 @@
 'use strict';
 
 /*
- * origin-check.js — ALLOWED_ORIGIN (host + origin lock) tests.
+ * base-url-lock-check.js — BASE_URL access lock (host + origin) tests.
  *
- * Runs against a gate started with its own public URL as the allowed origin:
- *   ALLOWED_ORIGIN=http://127.0.0.1:8088  BASE_URL=http://127.0.0.1:8088
+ * Runs against a gate whose BASE_URL is its own public URL:
+ *   BASE_URL=http://127.0.0.1:8088
  *   ADMIN_USERNAME=admin ADMIN_PASSWORD=test-pw PORT=8088
  *   MASTER_URL=http://127.0.0.1:3900/stremio/u/dill-alias/manifest.json
  * (test/run.sh starts it; the mock master must be up on :3900.)
@@ -14,7 +14,7 @@ const http = require('http');
 
 const PORT = 8088;
 const BASE = `http://127.0.0.1:${PORT}`;
-const ALLOWED = BASE;
+const ALLOWED = BASE; // BASE_URL is the only address the gate answers on
 
 let failures = 0;
 
@@ -70,7 +70,7 @@ async function main() {
   res = await fetch(`${BASE}/go/${kid}/manifest.json`);
   check('header-less request allowed', res.status === 200);
   check(
-    'CORS wildcard is gone when ALLOWED_ORIGIN is set',
+    'CORS wildcard is gone when BASE_URL is set',
     res.headers.get('access-control-allow-origin') === ALLOWED,
     `got ${res.headers.get('access-control-allow-origin')}`
   );

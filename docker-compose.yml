@@ -7,6 +7,13 @@ services:
       - "3000:3000"
     environment:
       # ── AIOStreams (same env vars you use today, passed straight through) ──
+      # Your public URL. It doubles as the gate's access lock: while set, the
+      # gate only answers on this host (an alternate domain or the raw IP
+      # pointed here gets 403, panel and /go alike) and only browser requests
+      # from this exact origin. Native Stremio apps/players/curl (no
+      # Origin/Referer) still work on it; /healthz stays reachable. Comment it
+      # out to drop the lock. Whatever terminates TLS in front must pass this
+      # name through (Host or X-Forwarded-Host).
       BASE_URL: "https://stream.dill.moe"              # your public URL
       DATABASE_URI: "sqlite://./data/db.sqlite"
       NODE_ENV: "production"
@@ -36,13 +43,6 @@ services:
       # 3000 is exposed directly with no proxy in front, or clients can spoof
       # those headers.
       # TRUST_PROXY: "1"
-      # Lock the gate to one URL (normally the same value as BASE_URL).
-      # The gate then only answers on that host — an alternate domain or the
-      # raw IP pointed at this container gets 403, panel and /go alike — and
-      # only browser requests from that exact origin are served. Native
-      # Stremio apps/players/curl (no Origin/Referer) still work on the
-      # allowed URL; /healthz stays reachable. Unset = any host/origin.
-      # ALLOWED_ORIGIN: "https://stream.dill.moe"
 
     volumes:
       - ./data:/app/data
