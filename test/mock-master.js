@@ -19,10 +19,9 @@ const UUID = 'abcdef1234567890';
 const PASS = 'testpassword123';
 const ROOT = `/stremio/${UUID}/${PASS}`;
 
-function json(res, obj, extra = {}) {
+function json(res, obj) {
   res.writeHead(200, {
     'content-type': 'application/json; charset=utf-8',
-    ...extra,
   });
   res.end(JSON.stringify(obj));
 }

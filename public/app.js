@@ -15,7 +15,6 @@ const state = {
   sessions: [],
   sessionTtlDays: 7,
   twoFactorEnabled: false,
-  currentSessionId: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -65,7 +64,7 @@ function toast(msg, kind = 'ok') {
 
 /* ---------- modal ---------- */
 
-function openModal(html, { onMount } = {}) {
+function openModal(html) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = html;
@@ -73,7 +72,6 @@ function openModal(html, { onMount } = {}) {
     if (e.target === overlay) closeModal();
   });
   $('#modal-root').appendChild(overlay);
-  if (onMount) onMount(overlay);
   const first = $('input, textarea, select, button', overlay);
   if (first) setTimeout(() => first.focus(), 30);
   return overlay;
@@ -170,7 +168,6 @@ function expiryPreview(raw) {
   if (/^(never|none)$/i.test(v)) return '→ never expires';
   const parsed = parseExpiryInput(v);
   if (parsed === undefined) return '⚠ invalid — use 7d, 30d, 1y, 2w, 12h or a date';
-  if (parsed === null) return '→ never expires';
   const d = new Date(parsed);
   return `→ expires ${d.toLocaleString()}`;
 }
@@ -483,7 +480,7 @@ function renderTable() {
         </td>
         <td>
           <div class="row-actions">
-            <a class="btn btn-sm btn-primary" href="${pagePath}" data-act="manage" data-id="${k.id}">Manage</a>
+            <a class="btn btn-sm btn-primary" href="${pagePath}" data-act="manage">Manage</a>
           </div>
         </td>
       </tr>`;
@@ -718,7 +715,6 @@ async function loadSessions() {
     ]);
     state.sessions = sRes.sessions || [];
     state.sessionTtlDays = sRes.sessionTtlDays || 7;
-    state.currentSessionId = meRes.sessionId || state.currentSessionId;
     state.twoFactorEnabled = !!meRes.twoFactorEnabled;
     renderSessions();
   } catch (err) {
@@ -911,7 +907,6 @@ async function revokeSession(id, isCurrent) {
     const r = await api(`api/sessions/${id}`, { method: 'DELETE' });
     toast(r.revokedCurrent ? 'Signed out' : 'Session revoked');
     if (r.revokedCurrent) {
-      state.currentSessionId = null;
       state.username = null;
       renderLogin();
     } else {
@@ -1350,7 +1345,7 @@ function renderHistTable(entries, q, page) {
     pagWrap.innerHTML = '';
     return;
   }
-  const showingStart = total === 0 ? 0 : start + 1;
+  const showingStart = start + 1;
   const showingEnd = Math.min(start + PAGE_SIZE, total);
   let html = `<div class="pagination-info">${total <= PAGE_SIZE ? `${total} ${total === 1 ? 'entry' : 'entries'}` : `Showing ${showingStart}–${showingEnd} of ${total}`} · Page ${clampedPage} of ${totalPages}</div>`;
   if (totalPages > 1) {
@@ -1416,7 +1411,6 @@ async function boot() {
   try {
     const me = await api('api/me');
     state.username = me.username;
-    state.currentSessionId = me.sessionId || null;
     state.twoFactorEnabled = !!me.twoFactorEnabled;
     await refresh();
     route();

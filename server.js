@@ -304,7 +304,6 @@ function parseAuthPair(raw) {
 function parseOrigin(raw) {
   const url = new URL(raw);
   return {
-    origin: url.origin,
     protocol: url.protocol,
     hostname: url.hostname,
     port: url.port,
@@ -2109,27 +2108,8 @@ function handleAdmin(req, res, pathname) {
       deleteKey(hk.id);
       return sendJson(res, 404, { error: 'not found' });
     }
-    // Optional server-side pagination: ?page=1&perPage=10 (both required to paginate).
-    // Without those params the full newest-500 is returned for backward compat.
-    const qUrl = new URL(req.url, 'http://localhost');
-    const qPage = parseInt(qUrl.searchParams.get('page'), 10);
-    const qPerPage = parseInt(qUrl.searchParams.get('perPage') || qUrl.searchParams.get('limit'), 10);
-    if (Number.isInteger(qPage) && Number.isInteger(qPerPage) && qPage >= 1 && qPerPage >= 1 && qPerPage <= 100) {
-      const all = keyHistory(parts[3], 5000);
-      const total = all.length;
-      const totalPages = Math.max(1, Math.ceil(total / qPerPage));
-      const page = Math.min(qPage, totalPages);
-      const start = (page - 1) * qPerPage;
-      sendJson(res, 200, {
-        entries: all.slice(start, start + qPerPage),
-        total,
-        page,
-        perPage: qPerPage,
-        totalPages,
-        retentionDays: Math.round(HISTORY_RETENTION_MS / 86400000),
-      });
-      return;
-    }
+    // The panel paginates this list client-side (10 rows a page), so the
+    // newest 500 entries are returned in one shot.
     sendJson(res, 200, {
       entries: keyHistory(parts[3], 500),
       retentionDays: Math.round(HISTORY_RETENTION_MS / 86400000),
