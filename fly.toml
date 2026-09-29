@@ -17,6 +17,13 @@ primary_region = "ord"
   AIOSTREAMS_INTERNAL_URL = "http://127.0.0.1:3210"
   AIOSTREAMS_INTERNAL_PORT = "3210"
   TRUST_PROXY = "1"
+  # Two Node processes share this machine (AIOStreams on :3210, the gate on
+  # :3000), so cap each one's heap well under the cgroup limit. Left uncapped,
+  # V8 sizes the old space against host RAM rather than the container's 1GB,
+  # and a background dataset rebuild (anime-database) pushed the process into
+  # the kernel's OOM range on 2026-09-29 -- the container was SIGKILLed and
+  # the app was down ~2h. 384MB per process leaves comfortable headroom.
+  NODE_OPTIONS = "--max-old-space-size=384"
 
 # One persistent volume holds everything: AIOStreams' db.sqlite + the gate's keys.json.
 [mounts]
@@ -41,4 +48,4 @@ primary_region = "ord"
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 512
+  memory_mb = 1024   # 512MB OOM-killed the container on 2026-09-29; ~$5.70/mo
