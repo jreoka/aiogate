@@ -1143,8 +1143,6 @@ function renderKeyPage() {
   if (!k) return;
   const st = keyStatus(k);
   const hist = state.currentHistory || [];
-  const lastUsed =
-    relTime(k.usage.lastUsedAt) + (k.usage.lastIp ? ` · ${esc(k.usage.lastIp)}` : '');
 
   const pauseBtn =
     st === 'active'
@@ -1185,7 +1183,7 @@ function renderKeyPage() {
           </div>
           <div class="meta-grid">
             <div class="meta"><div class="num">${fmtCount(k.usage.requests)}</div><div class="lbl">Requests</div></div>
-            <div class="meta"><div class="num">${lastUsed}</div><div class="lbl">Last used</div></div>
+            <div class="meta"><div class="num meta-num-sm">${relTime(k.usage.lastUsedAt)}${k.usage.lastIp ? `<br><span class="last-ip" title="${esc(k.usage.lastIp)}">${esc(k.usage.lastIp)}</span>` : ''}</div><div class="lbl">Last used</div></div>
             <div class="meta"><div class="num" style="font-size:13px;line-height:1.3">${k.expiresAt ? `${esc(new Date(k.expiresAt).toLocaleString())}<br><span class="faint" style="font-size:11px">${esc(relTime(k.expiresAt))}</span>` : '—'}</div><div class="lbl">Expires</div></div>
             <div class="meta"><div class="num">${relTime(k.createdAt)}</div><div class="lbl">Created</div></div>
           </div>

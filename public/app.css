@@ -396,7 +396,17 @@ table.keys tbody tr:hover { background: var(--surface-2); }
 }
 
 .meta .num { font-size: 14px; font-weight: 600; }
+.meta .num.meta-num-sm { font-size: 13px; line-height: 1.4; }
 .meta .lbl { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+/* Long IPs (IPv6) get their own line in a smaller mono font and wrap instead
+   of overflowing the card. Full address is on hover via the title attribute. */
+.last-ip {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 
 .hist-title { font-weight: 550; }
 
