@@ -12,6 +12,10 @@ else
   NODE_BIN=node
 fi
 
+# One-time data seed for fresh/older volumes (see docker/seed.cjs). The shell
+# here has almost no tools, so the copy itself runs under node.
+"$NODE_BIN" /app/seed.cjs
+
 AIOSTREAMS_INTERNAL_PORT="${AIOSTREAMS_INTERNAL_PORT:-3210}"
 export AIOSTREAMS_INTERNAL_URL="${AIOSTREAMS_INTERNAL_URL:-http://127.0.0.1:${AIOSTREAMS_INTERNAL_PORT}}"
 PUBLIC_PORT="${PORT:-3000}"

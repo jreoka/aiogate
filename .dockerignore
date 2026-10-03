@@ -9,3 +9,4 @@ docker-compose.yml
 .dockerignore
 README.md
 .env
+.migrate-tmp/
