@@ -13,7 +13,7 @@
 # Last updated 2026-10-02: 2.34.1 -> 2.35.7. Migrations 0028-0040 are new
 # (append-only; no existing migration was renamed, so AIOStreams' "refuse a
 # database migrated by a different build" guard does not trip).
-FROM ghcr.io/viren070/aiostreams:v2.35.7
+FROM ghcr.io/viren070/aiostreams:v2.35.8
 
 # We layer the gate on top and run both processes:
 #   AIOStreams  -> 127.0.0.1:3210  (internal, unpublished)
