@@ -47,8 +47,10 @@ const ADMIN_USERNAME =
   ENV.ADMIN_USERNAME || (AIOSTREAMS_AUTH_PAIR && AIOSTREAMS_AUTH_PAIR.username) || 'admin';
 const ADMIN_PASSWORD =
   ENV.ADMIN_PASSWORD || (AIOSTREAMS_AUTH_PAIR && AIOSTREAMS_AUTH_PAIR.password) || '';
-const SESSION_SECRET =
-  ENV.SESSION_SECRET || sha256('aio-gate:' + ADMIN_PASSWORD);
+// Session signing secret: explicit env wins; otherwise a random 32-byte
+// secret generated once and persisted in the data file (so sessions survive
+// restarts but the key is never derived from the admin password).
+let SESSION_SECRET = ENV.SESSION_SECRET || null;
 const DATA_FILE =
   ENV.DATA_FILE || path.join(process.cwd(), 'data', 'keys.json');
 const GATE_BASE = ((ENV.BASE_URL || ENV.PUBLIC_BASE || '').trim()).replace(/\/+$/, '');
@@ -2305,7 +2307,7 @@ function handleLogin(req, res) {
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
-        'set-cookie': `aio_session=${createSession(ADMIN_USERNAME, req)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+        'set-cookie': `aio_session=${createSession(ADMIN_USERNAME, req)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
       });
       res.end(JSON.stringify({ username: ADMIN_USERNAME }));
     })
@@ -2532,6 +2534,21 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 loadState();
+
+// Resolve the session signing secret: explicit env wins; otherwise generate
+// a random one once and persist it in the data file so sessions survive
+// restarts without the key being derived from the admin password.
+if (!SESSION_SECRET) {
+  if (typeof state.sessionSecret === 'string' && state.sessionSecret.length >= 32) {
+    SESSION_SECRET = state.sessionSecret;
+  } else {
+    SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+    state.sessionSecret = SESSION_SECRET;
+    saveStateSync();
+    console.log('[boot] generated new session signing secret (persisted)');
+  }
+}
+
 pruneHistory(true); // drop watch-history entries older than the retention window
 pruneSessions(); // drop expired sessions + cap the tracked set
 pruneExpiredKeys(); // delete keys whose expiresAt is in the past
