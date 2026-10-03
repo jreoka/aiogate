@@ -16,6 +16,7 @@ primary_region = "ord"
   DATA_FILE = "/app/data/keys.json"
   AIOSTREAMS_INTERNAL_URL = "http://127.0.0.1:3210"
   AIOSTREAMS_INTERNAL_PORT = "3210"
+  MAX_ADDONS = "50"
   TRUST_PROXY = "1"
   # Two Node processes share this machine (AIOStreams on :3210, the gate on
   # :3000), so cap each one's heap well under the cgroup limit. Left uncapped,
