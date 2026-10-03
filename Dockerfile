@@ -29,15 +29,6 @@ COPY package.json /app/gate/package.json
 COPY server.js /app/gate/server.js
 COPY public /app/gate/public
 COPY docker/start.sh /app/start.sh
-COPY docker/seed.cjs /app/seed.cjs
-
-# Optional data seed for fresh volumes (e.g. Fly.io migrations): at build time
-# drop a snapshot of /app/data here and write a .seed-version inside it
-# (e.g. `date +%s > seed-data/.seed-version`). On boot, start.sh copies the
-# seed into the (empty or older) volume. seed-data/ is gitignored; only
-# .gitkeep is committed so the COPY below never fails on a missing source.
-COPY seed-data/ /app/data-seed/
-
 # start.sh comes from the host checkout and may carry Windows CRLF line
 # endings (git autocrlf on Windows). Normalize it to LF at build time.
 # The base image ships no sed/tr, so use the bundled node to rewrite the
