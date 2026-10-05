@@ -1,19 +1,4 @@
-# aio-gate bundled with AIOStreams — one container, one volume.
-#
-# Base: the official AIOStreams image (distroless node24, WORKDIR /app,
-# data at /app/data).
-#
-# Pinned to an explicit version on purpose. `:latest` is rebuilt nightly, so a
-# floating tag makes every rebuild silently pull an untested upstream release --
-# and AIOStreams migrates the SQLite database on startup, so an unexpected bump
-# can rewrite data on the volume without warning. Bump this deliberately: read
-# the upstream CHANGELOG, back up /app/data/db.sqlite, and watch the startup
-# logs for migration errors.
-#
-# Last updated 2026-10-02: 2.34.1 -> 2.35.7. Migrations 0028-0040 are new
-# (append-only; no existing migration was renamed, so AIOStreams' "refuse a
-# database migrated by a different build" guard does not trip).
-FROM ghcr.io/viren070/aiostreams:v2.35.8
+FROM ghcr.io/viren070/aiostreams:v2.35.9
 
 # We layer the gate on top and run both processes:
 #   AIOStreams  -> 127.0.0.1:3210  (internal, unpublished)
