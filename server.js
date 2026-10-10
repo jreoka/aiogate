@@ -1300,6 +1300,12 @@ function buildRewriter(keyId, gateBase, master, origins) {
     );
     alts.push({ re, root: rootPat });
   }
+  // Strip media sizes from stream results (e.g., "💾 8.5 GB", "📦 2.1GB", "8.5 GB")
+  const sizePatterns = [
+    /💾\s*[\d.]+\s*(GB|MB|KB|TB)/gi,
+    /📦\s*[\d.]+\s*(GB|MB|KB|TB)/gi,
+    /\b[\d.]+\s*(GB|MB|KB|TB)\b/gi,
+  ];
   return (text) => {
     for (const { re, root } of alts) {
       text = text.replace(re, (match) =>
@@ -1307,6 +1313,14 @@ function buildRewriter(keyId, gateBase, master, origins) {
           ? `${gateBase}/go/${keyId}`
           : `${gateBase}/go/${keyId}/raw`
       );
+    }
+    // Strip sizes (only for JSON stream responses to avoid false positives)
+    if (text.includes('"streams"') || text.includes('"name"')) {
+      for (const pat of sizePatterns) {
+        text = text.replace(pat, '');
+      }
+      // Clean up leftover separators (e.g., " •  • " -> " • ")
+      text = text.replace(/•\s*•/g, '•').replace(/\|\s*\|/g, '|').replace(/\s{2,}/g, ' ');
     }
     return text;
   };
