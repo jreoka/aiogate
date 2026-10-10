@@ -1319,6 +1319,16 @@ function buildRewriter(keyId, gateBase, master, origins) {
     }
     // Strip sizes (only for JSON stream responses to avoid false positives)
     if (text.includes('"streams"') || text.includes('"name"')) {
+      // Nuvio pills SIZE from the numeric videoSize/folderSize/size fields,
+      // not the title text — no GB string to match. Drop the keys (a 0 would
+      // pill as "0 B"). Each key is removed comma-safely in all positions:
+      // trailing comma first, then a preceding comma (last key), then bare
+      // (sole key) — a single optional-comma pattern leaves '{"a":1,}'.
+      const dropJsonKey = (body, key) => body
+        .replace(new RegExp(`"${key}"\\s*:\\s*(?:\\d+|null)\\s*,`, 'g'), '')
+        .replace(new RegExp(`,\\s*"${key}"\\s*:\\s*(?:\\d+|null)`, 'g'), '')
+        .replace(new RegExp(`"${key}"\\s*:\\s*(?:\\d+|null)`, 'g'), '');
+      text = dropJsonKey(dropJsonKey(dropJsonKey(text, 'videoSize'), 'folderSize'), 'size');
       for (const pat of sizePatterns) {
         text = text.replace(pat, '');
       }
