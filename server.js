@@ -1300,10 +1300,13 @@ function buildRewriter(keyId, gateBase, master, origins) {
     );
     alts.push({ re, root: rootPat });
   }
-  // Strip media sizes from stream results (e.g., "💾 8.5 GB", "📦 2.1GB", "8.5 GB")
+  // Strip media sizes from stream results (e.g., "💾 8.5 GB", "📦 2.1GB",
+  // "SIZE 23.5 GB", "8.5 GB"). The whole-phrase patterns run first so no
+  // orphan label ("SIZE" with no number) is left behind for Nuvio to pill.
   const sizePatterns = [
     /💾\s*[\d.]+\s*(GB|MB|KB|TB)/gi,
     /📦\s*[\d.]+\s*(GB|MB|KB|TB)/gi,
+    /\bSIZE\s*[\d.]+\s*(GB|MB|KB|TB)/gi,
     /\b[\d.]+\s*(GB|MB|KB|TB)\b/gi,
   ];
   return (text) => {
