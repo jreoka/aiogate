@@ -1,4 +1,4 @@
-FROM ghcr.io/viren070/aiostreams:v2.35.9
+FROM ghcr.io/viren070/aiostreams:v2.36.0
 
 # We layer the gate on top and run both processes:
 #   AIOStreams  -> 127.0.0.1:3210  (internal, unpublished)
